@@ -523,6 +523,26 @@ That second variable is the most promising remaining lead, because it is the dif
 
 **Practical consequence for the user:** joining a friend's lobby is not inherently better or worse — it depends on **where that friend is**. An Indonesian host keeps you in Jakarta; a Malaysian host moves you to KL (+16 ms on the floor); a Singaporean host would move you to Singapore.
 
+### 5.9 The "server pull" model — a community concept that fits the data
+
+The user's community describes **"server pull"**: how strongly a party member's connection pulls the match toward their region. Reported behaviour:
+
+- Some hosts are **weak** — if another member joins, the match moves to that member's server instead.
+- The user's own pull is **fairly strong** and usually keeps the lobby Indonesian.
+- As the **sole Indonesian**, the user often lands on "sub-Indo" regions instead.
+- **One particular friend**, whenever he joins, overrides the user's pull entirely and moves the whole lobby to Malaysia.
+- The user also reports that **partying does not inherently cost the main server** — even as the sole Indonesian they often still get it.
+
+**Technical interpretation (hypothesis, not established):** this is the signature of a matchmaker that **minimises the worst-case latency** across the party, rather than averaging it. Under a min-max rule, the member with the *worst* connection to a candidate region dominates the choice — which is exactly what "pull" describes. A member in Malaysia has poor latency to Jakarta, so Jakarta is ruled out and KL wins, regardless of how good everyone else's Jakarta latency is.
+
+Alternative formulations that also fit: a weighted average where the worst member carries disproportionate weight; or a rule that requires every member to be under a latency threshold, so the most-constrained member sets the region.
+
+**This revises the earlier hypothesis** (§5.8) that partying per se pushes the user to Omni Cloud. The controlling variable appears to be the **party's aggregate latency profile**, not party size or the simple presence of foreign friends.
+
+**Testable prediction:** the friend who "always turns it Malay" should have materially worse latency to Jakarta than the user does. That is directly checkable — have that friend ping the Jakarta servers (`216.133.157.51`, `103.157.33.34`) and the KL server (`156.59.164.174`) from his own connection and share the numbers. If his Jakarta latency is much worse, the min-max model is supported and "pull" is explained.
+
+**What this means for the user's options.** If min-max is right, then the practical lever is not "who hosts" but **"who is in the lobby"** — specifically, whether anyone's connection is bad enough to drag the region away. That reframes the whole problem from a hosting question to a party-composition question.
+
 ---
 
 ## 6. Endpoint identification and classification
