@@ -461,6 +461,19 @@ Both ran for the full match with similar packet volumes. This is not a reconnect
 
 **VPN caveat, now confirmed as material.** PCAPdroid's non-root capture proxies L4 sockets, which inflates latency and, more importantly, **distorts the game's own latency probes**. Since those probes appear to feed placement, running PCAPdroid during play may change matchmaking. **Use it only for short identification captures, never during normal play.** ICMP measurements taken from `adb shell` bypass the VPN (the app filter scopes it to MLBB), so they remain valid for characterising the real path.
 
+**Lobby ping vs in-game ping — explained with numbers (2026-11-14, 23:30).** With the VPN off, the user reported lobby ping **55–60 ms** but in-match ping **40–45 ms** — the lobby reading being *higher*. Measurement confirms why:
+
+| Phase | Endpoint | ICMP min | Displayed |
+|---|---|---|---|
+| Lobby | `161.202.213.215` — Singapore, IBM Cloud | 46.5 ms | 55–60 ms |
+| Match | `103.157.33.34` — Jakarta, Omni Cloud | 28.3 ms | 40–45 ms |
+
+The lobby gateway is in **Singapore**; the match server was in **Jakarta**. The ~18 ms gap between the two ICMP minima is the Singapore↔Jakarta distance, and the displayed pings track it with a consistent ~10–17 ms of application overhead.
+
+**Conclusion: lobby ping is not a predictor of in-game ping — it measures a different and farther endpoint.** This is the first quantitative confirmation of the §3.1 hypothesis, and it explains the user's observation that lobby and custom-room readings do not translate to classic/ranked performance.
+
+**Network state that night deteriorated badly.** By 23:30, ICMP to the Jakarta server showed **20% packet loss**, avg 220 ms, max 906 ms. Any placement conclusion drawn from that session is confounded by congestion; the endpoint findings remain valid, the latency findings do not.
+
 ---
 
 ## 6. Endpoint identification and classification
