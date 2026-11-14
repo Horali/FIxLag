@@ -557,6 +557,27 @@ So the robust variable may not be party composition at all, but simply **solo ve
 
 **Caveat, stated plainly:** this model has now moved three times in one evening, each time on recalled rather than measured data. It needs contemporaneous measurement, not memory. The two captures that would settle it are a **solo classic/ranked** and a **duo with the MY friend**, both captured.
 
+### 5.10 Link A/B: Wi-Fi vs mobile data (clean, single-link)
+
+Both radios were tested in isolation, same servers, same minute. Mobile data was disabled for the Wi-Fi run and Wi-Fi disabled for the mobile run; the default interface was verified each time (`wlan0` vs `rmnet_data0`).
+
+| Target | Wi-Fi min / avg / jitter | Mobile min / avg / jitter |
+|---|---|---|
+| KL (Malay) `156.59.164.174` | 37.2 / 62.5 / **33.0** | 74.4 / 78.1 / **2.5** |
+| Zenlayer Jakarta `216.133.157.51` | 22.7 / 33.7 / 10.7 | 22.8 / 26.7 / 2.2 |
+| Omni Cloud Jakarta `103.157.33.34` | 20.2 / 29.6 / 7.7 | — |
+| Singapore lobby `161.202.213.215` | 33.4 / 40.5 / 6.3 | 34.8 / 38.4 / 2.9 |
+| `1.1.1.1` | 20.5 / 29.6 / 7.1 | 36.7 / 39.9 / 1.9 |
+
+**Findings:**
+
+1. **The KL path is link-dependent, not server-dependent.** Same server, same minute: 37 ms on Wi-Fi, 74 ms on cellular. The carrier routes poorly to Malaysia; the dorm ISP does not. Jakarta and Singapore are essentially identical on both links.
+2. **Mobile data has far lower jitter** (2–3 ms) than the dorm Wi-Fi (6–33 ms). For stability, cellular wins decisively.
+3. **Wi-Fi's KL advantage is fragile:** min 37 ms but avg 62 and max 159. A steady 74 ms on cellular may feel better than a 37–159 ms Wi-Fi path. Lowest ping is not the same as best connection.
+4. **This partly vindicates the user's claim** that the 70 ms to the Malay server is not congestion — jitter on that path is only 2.5 ms. But it is **not purely server-side** either: the same IP is 37 ms on Wi-Fi.
+
+**Caveat:** these are ICMP measurements over the default network. With Network Boost enabled, MLBB may use either link per packet, so the game's actual path is not necessarily the default route. These numbers characterise the two links, not the game's behaviour.
+
 ---
 
 ## 6. Endpoint identification and classification
