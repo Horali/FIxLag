@@ -395,6 +395,46 @@ Fallbacks tested and rejected:
 
 **What this does not invalidate:** the ICMP/RTT methodology, party-composition logging, and network-quality measurements all still work. Only *endpoint identification* needs a different tool.
 
+### 5.8 First successful capture: server identified, and a global probe sweep discovered (2026-11-14)
+
+PCAPdroid was installed and a capture taken during a user-hosted custom match with one Philippine friend (745 KB, 4,193 packets, link type raw IP).
+
+**The match server was identified:**
+
+```
+103.157.33.137:5522   ↔  phone   2,427 packets over 33.4 s
+→ Jakarta, Indonesia · AS141109 PT Omni Cloud Indonesia
+```
+
+So this match ran on an **Indonesian** server, not Singapore — consistent with the user's own "sub indo" label, and the first time that label has been corroborated by an actual IP.
+
+**A second, unexpected behaviour: a global latency probe sweep.**
+
+Immediately after the match ended (return to lobby), MLBB sent **12 single UDP packets to port 30190, roughly one per second**, to servers around the world:
+
+| Target IP | Location | Provider |
+|---|---|---|
+| `138.113.116.210` | **Jakarta, ID** | Meteverse |
+| `161.202.206.8` | Singapore | IBM Cloud |
+| `164.52.101.74` | Singapore | CDS Global Cloud |
+| `156.59.62.2` | Kuala Lumpur, MY | Zenlayer |
+| `156.59.174.66` | Bangkok, TH | Zenlayer |
+| `103.96.77.3` | Sydney, AU | — |
+| `95.56.249.147` | Almaty, KZ | Kazakhtelecom |
+| `162.128.95.191` | Istanbul, TR | Zenlayer |
+| `158.177.179.120` | Frankfurt, DE | IBM Cloud |
+| `169.51.41.168` | Lelystad, NL | IBM Cloud |
+| `128.14.211.34` | Dallas, US | Zenlayer |
+| `128.14.216.62` | Miami, US | Zenlayer |
+
+Some targets replied from a different source port (e.g. `95.56.249.147:39161`, `156.59.62.2:60537`).
+
+**Interpretation (hypothesis, not established):** this looks like a **regional latency probe** — the client measures round-trip time to a set of regional servers, presumably to decide which region's pool to place the player in. If so, it is the first direct view of the mechanism behind the user's "unpredictable" placement: the game is measuring latency to servers worldwide, and those measurements vary with network conditions.
+
+**A testable sub-hypothesis that would explain the two Indonesian ping bands.** The probe list contains a Jakarta server from **Meteverse** (`138.113.116.210`), while the match actually ran on a Jakarta server from **Omni Cloud** (`103.157.33.137`). Two different Indonesian providers would mean two different Indonesian facilities — which is exactly the shape of the user's "main server" (15–25 ms) versus "sub indo" (30–45 ms) distinction. **This is now the single most promising explanation for the core symptom.**
+
+**Caveats.** The capture ran under PCAPdroid's VPN, so the latency during that match is not representative (the VPN proxies traffic and likely disabled Network Boost). The *server IP* is valid; the *ping* is not. Also, the probe sweep occurred after the match, not before it, so its causal role in placement is inferred rather than observed.
+
 ---
 
 ## 6. Endpoint identification and classification
@@ -774,8 +814,9 @@ Given the evidence, the most likely available improvement is **not latency reduc
 ## 13. Remaining unknowns and limitations
 
 **Blocking unknowns (must be resolved before the architecture is committed):**
-1. ~~Do MLBB's match-phase UDP sockets expose remote addresses?~~ **Resolved: no.** They are unconnected; the kernel will not reveal the destination without root (§5.7). Endpoint identification now requires PCAPdroid or hotspot capture.
+1. ~~Do MLBB's match-phase UDP sockets expose remote addresses?~~ **Resolved: no** (§5.7). Endpoint identification now runs through PCAPdroid, which **works** — the first match server was captured on 2026-11-14 (§5.8).
 2. Does the party-size effect (H6) survive controlling for hour of day? (§7.2)
+3. **Are there two Indonesian server providers** (Omni Cloud vs Meteverse), and does the choice between them explain the "main" vs "sub indo" ping bands? (§5.8)
 
 **Material unknowns (affect interpretation):**
 4. What the displayed in-game ping actually measures.
