@@ -474,6 +474,29 @@ The lobby gateway is in **Singapore**; the match server was in **Jakarta**. The 
 
 **Network state that night deteriorated badly.** By 23:30, ICMP to the Jakarta server showed **20% packet loss**, avg 220 ms, max 906 ms. Any placement conclusion drawn from that session is confounded by congestion; the endpoint findings remain valid, the latency findings do not.
 
+**Third capture (2026-11-14, 23:35–23:46): solo brawl — the main server identified.**
+
+```
+216.133.157.51:5506   →   Jakarta, Indonesia · AS62610 Zenlayer
+16,385 packets over 10.4 minutes
+```
+
+The user confirms this is their **main server** — the 22–33 ms experience they consider normal. This is the first capture of a match they identify as "main," and it ran on **Zenlayer Jakarta**, not Omni Cloud Jakarta.
+
+**This is the strongest evidence yet for the provider hypothesis:**
+
+| Match | Server | Provider | User's experience |
+|---|---|---|---|
+| Solo brawl | `216.133.157.51` | **Zenlayer**, Jakarta | **main server, 22–33 ms** |
+| Custom (PH friend) | `103.157.33.137` | Omni Cloud, Jakarta | sub-Indo, 30–40 ms |
+| Custom (VN friend) | `103.157.33.34` | Omni Cloud, Jakarta | sub-Indo, 30–45 ms |
+
+Same city, different provider, different experience. **"Main vs sub-Indo" may be a provider difference rather than a city difference** — which would mean the user has never been on a Surabaya server, and the variable is *which Jakarta facility*.
+
+**Important confound:** the main-server match was **solo**, while both sub-Indo matches were **custom rooms with foreign friends**. Provider and party composition are entangled. Disentangling them requires either a solo match landing on Omni Cloud, or a custom match landing on Zenlayer.
+
+**Probe sweep:** 14 probes after the brawl, again a different subset — the pool is larger than any single sweep, so the client appears to sample it rather than exhaustively test it each time.
+
 ---
 
 ## 6. Endpoint identification and classification
