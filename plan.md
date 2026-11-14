@@ -365,6 +365,36 @@ The capability probe was run against the actual phone. Results:
 
 **A note on the Singapore gateway.** The login/gateway being in Singapore does *not* mean matches are hosted there. It is one endpoint among several. It does show that Moonton's SEA authentication path hubs in Singapore, which is consistent with — but not proof of — the idea that SEA match infrastructure may also be regionalised there.
 
+### 5.7 Match-phase result: the ADB method cannot identify the server (verified 2026-11-14)
+
+A custom match was started (user-hosted, one Philippine friend). During loading, MLBB opened two UDP sockets:
+
+```
+0.0.0.0:40060   rem 00000000:0000   st 07
+0.0.0.0:48438   rem 00000000:0000   st 07
+```
+
+**Both are unconnected.** `rem_address` is zero and the local address is `0.0.0.0` — the game uses `sendto` on unbound sockets. `/proc/net/udp` therefore gives the local port but **never the destination**.
+
+Fallbacks tested and rejected:
+
+| Method | Result |
+|---|---|
+| `/proc/net/nf_conntrack` | `-r--r----- root root` → **permission denied** for shell |
+| `netstat -uan` | Lists the sockets, but foreign address is `0.0.0.0:*` — same data, same limitation |
+| `ss -un` | Netlink **permission denied**; partial output only |
+| `logcat` | No server or IP lines from MLBB |
+| `/proc/<pid>/net/udp` | Same network namespace as `/proc/net/udp` — no new information |
+
+**Conclusion: without root, the kernel will not tell us where MLBB sends its packets.** The zero-overhead method is dead for endpoint identification. This was flagged as the decisive risk in §5.1; it is now resolved negatively.
+
+**Revised recommendation — capture, don't inspect:**
+
+1. **PCAPdroid** (free, open source), no-dump mode, app filter on MLBB. It sees the destination IP because it intercepts at the IP layer regardless of socket type. Costs: occupies the single VPN slot, proxies traffic, and may interfere with Network Boost during the capture. Use for **identification runs only**, then measure RTT separately with normal settings.
+2. **Laptop-hosted hotspot + Wireshark.** No phone-side app and no VPN slot, but this laptop has Wi-Fi only (no Ethernet), so Wi-Fi→hotspot sharing may not work, and it inserts a hop that changes the path. Identification only.
+
+**What this does not invalidate:** the ICMP/RTT methodology, party-composition logging, and network-quality measurements all still work. Only *endpoint identification* needs a different tool.
+
 ---
 
 ## 6. Endpoint identification and classification
@@ -744,7 +774,7 @@ Given the evidence, the most likely available improvement is **not latency reduc
 ## 13. Remaining unknowns and limitations
 
 **Blocking unknowns (must be resolved before the architecture is committed):**
-1. Do MLBB's **match-phase** UDP sockets expose remote addresses? The table and the connected-socket behaviour are already verified on this device (§5.6); only the match case is pending.
+1. ~~Do MLBB's match-phase UDP sockets expose remote addresses?~~ **Resolved: no.** They are unconnected; the kernel will not reveal the destination without root (§5.7). Endpoint identification now requires PCAPdroid or hotspot capture.
 2. Does the party-size effect (H6) survive controlling for hour of day? (§7.2)
 
 **Material unknowns (affect interpretation):**
