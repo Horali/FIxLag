@@ -4,7 +4,7 @@
 **Revision:** 3 (supersedes revisions 1–2)
 **Date:** 2026-11-14
 **Subject:** Personal, zero-cost tooling to understand, predict, and possibly improve MLBB ping when playing in parties
-**Environment:** Samsung Galaxy S25+ (Android 16 / One UI 8), Windows laptop, ADB over USB, no paid infrastructure
+**Environment:** Samsung Galaxy S25+ (SM-S936B, Android 17), Windows laptop, ADB over USB, no paid infrastructure
 
 > **Revision note.** Revision 1 drew conclusions the evidence did not support — it mapped ping values to physical data centers, declared latency floors, and promoted Network Boost to the leading cause of instability. Revision 2 removed those claims and rebuilt the measurement methodology around what can be observed without root. **Revision 3 integrates your follow-up answers**, which resolve the "circularity" problem (your server labels come from player flags, not ping) and surface a strong new signal: the number of Indonesian players in the party correlates with getting your main server. A full change list is in §15.
 
@@ -341,6 +341,29 @@ Then, **during an actual match**, repeatedly dump `/proc/net/udp` and `/proc/net
 - `/proc/net/udp` and `/proc/net/udp6` are separate files; **both must be read**.
 - Addresses are hex, **little-endian per 32-bit word**. IPv4: `0100007F:1C23` → `127.0.0.1:7203`. IPv6 uses four such words and is easy to get wrong — validate the parser against a known-good tool before trusting it.
 - If MLBB uses IPv6, an IPv4-only collector will silently miss everything.
+
+### 5.6 Phase 0 probe results — verified on this device (2026-11-14)
+
+The capability probe was run against the actual phone. Results:
+
+| Check | Result | Status |
+|---|---|---|
+| adb authorization | OK, `adb` 37.0.1, device `RRCY1032Y6F` | **Verified** |
+| Device / OS | SM-S936B, **Android 17** (SDK 37), build `CP2A.260605.016.S936BXXUDDZJB` | **Verified** |
+| MLBB package | `com.mobile.legends`, **UID 10372**, v2.2.23.12351 | **Verified** |
+| `shell` can read `/proc/net/udp` | Yes — 25 rows returned | **Verified** |
+| `rem_address` populated for connected sockets | **Yes** — two QUIC sockets to Google on `:443` showed real remotes | **Verified** |
+| `shell` can read `/proc/net/udp6` | Yes — 6 rows | **Verified** |
+| MLBB uses native IPv6 | **No** — its `tcp6` sockets are IPv4-mapped (`::ffff:x.x.x.x`) on `:443` | **Verified** |
+| Lobby phase transport | **TCP only** — zero MLBB UDP sockets while sitting in the lobby | **Verified** |
+| Lobby/gateway endpoint | `161.202.213.215:30101` → **IBM Cloud (SoftLayer), AS36351, Singapore** | **Verified** |
+| Match-phase UDP sockets | Not yet observed | **Pending a match** |
+
+**What this settles.** The zero-overhead ADB method is structurally viable on this device: the table is readable, and connected sockets expose their remote addresses. The only remaining question is whether MLBB's *match* sockets are connected — which needs one match to answer.
+
+**What it changes in the model.** The lobby is TCP-only, so the "lobby ping" you see is measured over TCP or by a short-lived probe, not over the match protocol. That is direct evidence that lobby ping and in-game ping are different measurements and should never be compared as if they were the same quantity (§4.1).
+
+**A note on the Singapore gateway.** The login/gateway being in Singapore does *not* mean matches are hosted there. It is one endpoint among several. It does show that Moonton's SEA authentication path hubs in Singapore, which is consistent with — but not proof of — the idea that SEA match infrastructure may also be regionalised there.
 
 ---
 
@@ -721,9 +744,8 @@ Given the evidence, the most likely available improvement is **not latency reduc
 ## 13. Remaining unknowns and limitations
 
 **Blocking unknowns (must be resolved before the architecture is committed):**
-1. Does MLBB use connected UDP sockets? (§5.1)
-2. Can the `shell` user read `/proc/net/udp` on this specific S25+ / One UI 8 build? (§5.2)
-3. Does the party-size effect (H6) survive controlling for hour of day? (§7.2)
+1. Do MLBB's **match-phase** UDP sockets expose remote addresses? The table and the connected-socket behaviour are already verified on this device (§5.6); only the match case is pending.
+2. Does the party-size effect (H6) survive controlling for hour of day? (§7.2)
 
 **Material unknowns (affect interpretation):**
 4. What the displayed in-game ping actually measures.
