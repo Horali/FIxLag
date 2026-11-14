@@ -497,6 +497,32 @@ Same city, different provider, different experience. **"Main vs sub-Indo" may be
 
 **Probe sweep:** 14 probes after the brawl, again a different subset — the pool is larger than any single sweep, so the client appears to sample it rather than exhaustively test it each time.
 
+**Fourth capture (2026-11-14, 23:55): MY-hosted brawl — the host's region wins.**
+
+```
+156.59.164.174:5515   →   Kuala Lumpur, Malaysia · AS21859 Zenlayer
+ICMP min 37.6 ms · avg 47.4 ms · 0% loss
+```
+
+The user confirmed in-game that it was a Malaysian server. **This confirms that the host's region determines the server region.** When the user (Indonesia) hosted custom rooms, the server was Jakarta; when a Malaysian friend hosted, it was Kuala Lumpur.
+
+**The refined model after four captures:**
+
+| Condition | Server city | Provider | ICMP floor |
+|---|---|---|---|
+| Solo brawl | Jakarta | **Zenlayer** | 22 ms |
+| User-hosted custom (PH / VN friends) | Jakarta | **Omni Cloud** | 21 ms |
+| MY-hosted brawl | **Kuala Lumpur** | Zenlayer | 38 ms |
+
+Two separate variables are now visible:
+
+1. **Region** — follows the **host's country**. Indonesia host → Jakarta; Malaysia host → KL.
+2. **Provider within that region** — not yet explained. Solo brawl gave Zenlayer; user-hosted parties gave Omni Cloud, both in Jakarta.
+
+That second variable is the most promising remaining lead, because it is the difference between the user's "main server" (Zenlayer, 22–33 ms) and "sub-Indo" (Omni Cloud, 30–45 ms) *within the same city*.
+
+**Practical consequence for the user:** joining a friend's lobby is not inherently better or worse — it depends on **where that friend is**. An Indonesian host keeps you in Jakarta; a Malaysian host moves you to KL (+16 ms on the floor); a Singaporean host would move you to Singapore.
+
 ---
 
 ## 6. Endpoint identification and classification
