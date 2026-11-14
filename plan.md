@@ -543,6 +543,20 @@ Alternative formulations that also fit: a weighted average where the worst membe
 
 **What this means for the user's options.** If min-max is right, then the practical lever is not "who hosts" but **"who is in the lobby"** — specifically, whether anyone's connection is bad enough to drag the region away. That reframes the whole problem from a hosting question to a party-composition question.
 
+**Update (2026-11-15, 00:16) — the min-max reading is weakened.** The user cannot confirm the "always Malay" behaviour. It happened at least once, but **this season, duoing with that same friend usually produces an Indonesian server** — just not the main one (estimated 30–40 ms, i.e. the Omni Cloud band). A Malaysian member therefore does *not* reliably drag the lobby to KL, which is hard to reconcile with a pure worst-case rule.
+
+**Revised reading — the simpler pattern.** Across every capture this season, the split is:
+
+| Condition | Server | Band |
+|---|---|---|
+| **Solo** (brawl) | Zenlayer Jakarta | **main, 22–33 ms** |
+| **Any party** — user-hosted with PH/VN friends, or duo with the MY friend | Omni Cloud Jakarta | **sub-Indo, 30–45 ms** |
+| MY friend **hosts** | Kuala Lumpur | 38 ms floor |
+
+So the robust variable may not be party composition at all, but simply **solo versus party**. The user's memory of getting the main server while partying may date from an earlier season — consistent with their own report that behaviour shifts between seasons.
+
+**Caveat, stated plainly:** this model has now moved three times in one evening, each time on recalled rather than measured data. It needs contemporaneous measurement, not memory. The two captures that would settle it are a **solo classic/ranked** and a **duo with the MY friend**, both captured.
+
 ---
 
 ## 6. Endpoint identification and classification
