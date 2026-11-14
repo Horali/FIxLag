@@ -1,0 +1,28 @@
+# Logs and captures
+*.log
+capture.log
+captures/
+
+# Local data
+data/
+
+# Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# OS
+Thumbs.db
+.DS_Store
