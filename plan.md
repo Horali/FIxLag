@@ -435,6 +435,32 @@ Some targets replied from a different source port (e.g. `95.56.249.147:39161`, `
 
 **Caveats.** The capture ran under PCAPdroid's VPN, so the latency during that match is not representative (the VPN proxies traffic and likely disabled Network Boost). The *server IP* is valid; the *ping* is not. Also, the probe sweep occurred after the match, not before it, so its causal role in placement is inferred rather than observed.
 
+**Second capture (2026-11-14, 23:17–23:26).** A second custom match, this time with a **Vietnamese** friend, produced a **63-server probe sweep** over 27 seconds — a different and far larger list than the first sweep's 12. Notable entries:
+
+| Target | Location | Provider |
+|---|---|---|
+| `103.157.33.33` | Jakarta, ID | Omni Cloud (same /24 as the match server) |
+| `148.153.100.254` | Jakarta, ID | CDS Global Cloud |
+| `138.113.116.245` | Jakarta, ID | Meteverse |
+| `161.202.218.136` and many `161.202.x` | Singapore | IBM Cloud |
+| `43.133.218.215` | Tokyo, JP | Tencent Cloud |
+| `15.220.137.149` | Delhi, IN | AWS (ap-south-1) |
+| `103.96.77.3` | Sydney, AU | — |
+| `162.128.95.191` | Istanbul, TR | Zenlayer |
+
+**At least three distinct Jakarta providers** appear (Omni Cloud, CDS Global Cloud, Meteverse). That strengthens the two-facility hypothesis: "Indonesian server" is not one thing, and the ping difference between them is exactly the shape of the user's main-vs-sub-Indo symptom.
+
+**Two concurrent match connections were also observed:**
+
+```
++210.3s  →  161.202.220.150:10011   Singapore, IBM Cloud
++213.7s  →  103.157.33.34:5507      Jakarta, Omni Cloud
+```
+
+Both ran for the full match with similar packet volumes. This is not a reconnect — it looks like a **multi-server or relay architecture**, where the client holds connections to more than one regional server. If the user's experienced latency depends on the worse of two paths, that is itself a source of instability. Mechanism unknown; flagged as an open question.
+
+**VPN caveat, now confirmed as material.** PCAPdroid's non-root capture proxies L4 sockets, which inflates latency and, more importantly, **distorts the game's own latency probes**. Since those probes appear to feed placement, running PCAPdroid during play may change matchmaking. **Use it only for short identification captures, never during normal play.** ICMP measurements taken from `adb shell` bypass the VPN (the app filter scopes it to MLBB), so they remain valid for characterising the real path.
+
 ---
 
 ## 6. Endpoint identification and classification
