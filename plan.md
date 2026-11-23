@@ -662,6 +662,17 @@ Both directions, both links, same server and port, near-identical packet counts 
 
 **Multipath held for the whole match:** ~22,100 packets on Wi-Fi and ~22,800 on cellular, both directions, over 9 minutes — so Network Boost duplicates for the entire session, not just during load spikes.
 
+**RTT recovered from the game's own UDP stream (2026-11-23).** Cross-correlation of outbound vs inbound packet timing fails here — both streams are tick-synchronised, so the peak lands at zero lag. A gap-based method works instead: after each quiet period (>250 ms), measure the delay to the server's first reply.
+
+| Link | n | p10 | median | p90 |
+|---|---|---|---|---|
+| Wi-Fi | 165 | 7.5 ms | **38.8 ms** | 65.6 ms |
+| Cellular | 160 | 14.8 ms | **46.9 ms** | 130.4 ms |
+
+Three independent methods now agree on the Wi-Fi RTT to this server: **ICMP 35.4 ms, game-UDP gap estimation 38.8 ms, in-game display ~40 ms.** The playback overhead is roughly 4–5 ms.
+
+**Two consequences.** First, Wi-Fi is the better link for this server (38.8 vs 46.9 ms median), so Network Boost's duplication is doing real work — it takes the Wi-Fi copy and uses cellular as a fallback. Second, the cellular tail (p90 130 ms vs 66 ms on Wi-Fi) is where the user's occasional 100 ms+ spikes come from.
+
 ---
 
 ## 6. Endpoint identification and classification
