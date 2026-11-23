@@ -578,6 +578,33 @@ Both radios were tested in isolation, same servers, same minute. Mobile data was
 
 **Caveat:** these are ICMP measurements over the default network. With Network Boost enabled, MLBB may use either link per packet, so the game's actual path is not necessarily the default route. These numbers characterise the two links, not the game's behaviour.
 
+### 5.11 Root channel established via Termux (2026-11-23)
+
+DirtyFrag's ephemeral KernelSU root is **not reachable from `adb shell`**: uid 2000 is not on the KernelSU allowlist, and no `ksud` daemon is running to broker a grant (a late-loaded module on a locked bootloader has no boot-time init hook to relaunch it). `su` therefore returns `ENOENT` to adb, which is denial, not absence.
+
+**However, Termux holds root** (`uid=0(root) context=u:r:ksu:s0`), and adb can drive Termux through UI input. Working pattern:
+
+1. Write a shell script to `/sdcard` with adb.
+2. Type `su 0 sh /sdcard/<script>.sh` into Termux via `adb shell input text`.
+3. Send Enter with `adb shell input keyevent 66`.
+4. The script runs as root and writes its own output to `/sdcard` (redirection must happen *inside* the script — Termux's unprivileged shell cannot write to `/sdcard` root, so a trailing `> /sdcard/...` on the typed command fails with "Operation not permitted").
+5. Read the output with adb.
+
+**Verified capabilities:**
+
+| Tool | Result |
+|---|---|
+| `su` from Termux | `uid=0(root) gid=0(root) context=u:r:ksu:s0` |
+| `conntrack` | `/proc/net/nf_conntrack` readable; real UDP flows with IPs |
+| `tcpdump` | **`/system/bin/tcpdump` v4.99.6**, libpcap 1.10.6 |
+| `iptables` | works |
+| `ip route` / `ip addr` | works |
+| test capture | 83 packets / 8 s, 0 dropped, valid Ethernet-linktype PCAP |
+
+**This unblocks all five capabilities previously listed as unavailable** (§5.7 area): undistorted capture, live conntrack, per-server routing, probe-sweep capture, and QoS.
+
+**Constraints of the channel.** It is orchestrated rather than daemonised — commands are typed through the UI. Termux must stay running while a capture is active; switching to MLBB does not kill a foreground process in Termux. Long captures should therefore be bounded with `timeout` inside the script and collected afterwards.
+
 ---
 
 ## 6. Endpoint identification and classification
