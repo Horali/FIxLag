@@ -605,6 +605,27 @@ DirtyFrag's ephemeral KernelSU root is **not reachable from `adb shell`**: uid 2
 
 **Constraints of the channel.** It is orchestrated rather than daemonised — commands are typed through the UI. Termux must stay running while a capture is active; switching to MLBB does not kill a foreground process in Termux. Long captures should therefore be bounded with `timeout` inside the script and collected afterwards.
 
+**Automated channel (2026-11-23).** Typing through the UI is slow, so a root poller was installed instead. A root shell loop watches `/sdcard/cmd.sh`, executes it, and writes `/sdcard/cmd.out`:
+
+1. Push a script to `/sdcard/cmd.sh` with adb.
+2. The root poller picks it up within ~1 s and runs it as **root**.
+3. Read `/sdcard/cmd.out` with adb.
+
+This gives fully automated root command execution over adb without `su`, and it survives a soft reboot as long as the KernelSU module stays loaded.
+
+**Shell `su` cannot be enabled on this device.** KernelSU's allowlist `/data/adb/ksu/.allowlist` is a fixed-size binary record file containing exactly one entry, `com.termux`:
+
+```
+00000000: 5553 4b7f 0400 0000 0400 0000 636f 6d2e   USK.........com.
+0000000c: 7465 726d 7578 ...                        termux
+0000010c: 9c28 0000                                  uid 10396
+000002c8: 753a 723a 6b73 753a 7330                    "u:r:ksu:s0"
+```
+
+Adding a uid-2000 record requires the `ksud` daemon to write it, and on this late-loaded module `ksud` has no init hook to start itself (`ksud debug info` reports `runtime_mode: late-load`; `ksud debug sulogd` exits immediately with status 0). Hand-editing the binary risks corrupting the only working grant, so the daemon channel is the practical substitute.
+
+**Verified through the daemon:** `conntrack` (live UDP flows), `tcpdump` 4.99.6, `iptables`, `ip route`, `ip addr`. Interfaces at time of writing: `wlan0` UP at `192.168.1.6/24`; all `rmnet_data*` DOWN (mobile data off).
+
 ---
 
 ## 6. Endpoint identification and classification
