@@ -626,6 +626,28 @@ Adding a uid-2000 record requires the `ksud` daemon to write it, and on this lat
 
 **Verified through the daemon:** `conntrack` (live UDP flows), `tcpdump` 4.99.6, `iptables`, `ip route`, `ip addr`. Interfaces at time of writing: `wlan0` UP at `192.168.1.6/24`; all `rmnet_data*` DOWN (mobile data off).
 
+### 5.12 Network Boost is multipath packet duplication (2026-11-23)
+
+A solo-classic match was captured with `tcpdump` (no proxy, SLL2 link type with per-packet interface attribution). The game was sending the **same match traffic over Wi-Fi and cellular simultaneously**:
+
+```
+192.168.1.6:50827   → 148.153.165.218:5006   wlan0         250 pkts
+10.70.192.76:53041  → 148.153.165.218:5006   rmnet_data0   252 pkts
+148.153.165.218:5006 → 10.70.192.76:53041    rmnet_data0   160 pkts
+148.153.165.218:5006 → 192.168.1.6:50827     wlan0         159 pkts
+```
+
+Both directions, both links, same server and port, near-identical packet counts over the same 37-second window. This is **packet duplication across two paths**, not link selection.
+
+**Implications:**
+
+1. **Network Boost is a local multipath implementation.** It does natively what ExitLag's multipath does — minus the private backbone. That is a significant correction to the earlier reading of Moonton's "chooses the best network in real time" description, which implied switching.
+2. **Per-server routing is largely redundant.** The game already uses both links for the match, so forcing a destination out one interface would remove redundancy rather than add it.
+3. **The benefit is latency-flooring and redundancy:** whichever copy arrives first is used, so a stall on one link is masked by the other. That explains why the user reports it helps materially.
+4. It also explains why turning it off hurts: you lose the redundant path entirely.
+
+**Match server:** `148.153.165.218:5006`, AS63199 CDS Global Cloud — a third Jakarta-region provider alongside Zenlayer and Omni Cloud. Geolocation is **ambiguous**: `ipwho.is` places it in Singapore while a sibling IP (`148.153.100.254`) geolocated to Jakarta in `ipinfo`. This reinforces the §6 rule that GeoIP identifies a network, not a facility.
+
 ---
 
 ## 6. Endpoint identification and classification
