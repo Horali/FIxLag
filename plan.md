@@ -648,6 +648,20 @@ Both directions, both links, same server and port, near-identical packet counts 
 
 **Match server:** `148.153.165.218:5006`, AS63199 CDS Global Cloud — a third Jakarta-region provider alongside Zenlayer and Omni Cloud. Geolocation is **ambiguous**: `ipwho.is` places it in Singapore while a sibling IP (`148.153.100.254`) geolocated to Jakarta in `ipinfo`. This reinforces the §6 rule that GeoIP identifies a network, not a facility.
 
+**Per-link RTT to the match server (measured 2026-11-23, after the match):**
+
+| Target | Link | min | avg | max | jitter |
+|---|---|---|---|---|---|
+| `148.153.165.218` (CDS, this match) | wlan0 | **35.4** | 40.9 | 62.2 | 6.8 |
+| `148.153.165.218` (CDS) | rmnet_data0 | 41.8 | 53.7 | 75.9 | 8.1 |
+| `216.133.157.51` (Zenlayer, main server) | wlan0 | **24.8** | 27.8 | 35.0 | 3.0 |
+
+**This explains the 40 ms solo-classic result directly.** On the same link at the same time, the CDS server is ~10 ms farther than Zenlayer. The displayed 40 ms is roughly 5 ms of game overhead on top of a 35 ms network path. The "main vs sub-Indo" difference is therefore **measured provider routing**, not congestion, not the local link, and not a measurement artefact.
+
+**The probe sweep did not fire** during the 25-minute capture that included this full match. It is therefore neither continuous nor per-match, contrary to the earlier assumption that it fires around matches. Its actual trigger remains **unknown**.
+
+**Multipath held for the whole match:** ~22,100 packets on Wi-Fi and ~22,800 on cellular, both directions, over 9 minutes — so Network Boost duplicates for the entire session, not just during load spikes.
+
 ---
 
 ## 6. Endpoint identification and classification
