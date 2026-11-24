@@ -108,6 +108,8 @@ adb -s <serial> shell "input keyevent 66"
 **Laptop:**
 
 - `tools/parse_pcap.py` — parses PCAPdroid **or** tcpdump captures (raw IP / Ethernet / SLL / SLL2), prints top UDP flows **with interface attribution**, the port-30190 probe list, and match-server flows. Usage: `python tools/parse_pcap.py <file.pcap> [--probe]`.
+- `tools/draft_probe.py` — draft-pick classifier. Starts a labelled capture on the phone through the root daemon, pulls it, and names the match endpoint (`start` / `peek` / `finish` / `classify` / `ping` / `devices`). `finish` logs a row to `data/matches.csv`. Handles a still-growing pcap, so it can classify during the draft.
+- `tools/draft_capture.sh` — the on-device capture script `draft_probe.py` pushes to `/sdcard/`; all UDP at `-s 96`, `timeout`-bounded, sentinel file when done.
 - `adb` path above; always `-s <serial>`.
 
 **Capture recipe (no proxy, real timing):**
@@ -126,11 +128,15 @@ Then `adb pull /sdcard/all.pcap captures/all.pcap` and run the parser. Note `-i 
 ## 5. Repo layout
 
 ```
-plan.md                  the research (read §5.6–5.12 for the measured findings)
-tools/parse_pcap.py      capture parser (PCAPdroid + tcpdump, SLL2 aware)
-docs/handoff.md          this file
-.gitignore               ignores *.log, captures/, screen*.png, *.pcap
-captures/                local PCAPs, NOT committed
+plan.md                          the research (read §5.6–5.12 for the measured findings)
+tools/parse_pcap.py              capture parser (PCAPdroid + tcpdump, SLL2 aware)
+tools/draft_probe.py             draft-pick match-server classifier (host side)
+tools/draft_capture.sh           on-device capture script for the above
+docs/handoff.md                  this file
+docs/experiment-restart-vs-host.md   the next experiment, designed but not run
+.gitignore                       ignores *.log, captures/, data/, screen*.png, *.pcap
+captures/                        local PCAPs, NOT committed
+data/matches.csv                 local match log written by draft_probe.py, NOT committed
 ```
 
 Commit style: Conventional Commits, small, imperative, no AI attribution, push to `main`. See `~/.claude/CLAUDE.md`.
@@ -163,6 +169,8 @@ Commit style: Conventional Commits, small, imperative, no AI attribution, push t
 ## 7. Open questions (in priority order)
 
 1. **Why does hosting yourself give a worse server than a friend hosting?** The user's strongest observation: same 5-stack (Malay, Maldivian, Singaporean, Indian teammates), user hosting → 40 ms; user left + restarted MLBB, Malaysian friend became host → **19 ms**. Not explained. Two candidate causes, separable: (a) the app restart flushed cached server-latency state, (b) host identity changes the matchmaking input, (c) luck.
+   - **Caveat added 2026-11-24:** 19 ms displayed is below every floor ever measured from this phone (best Jakarta ICMP min is 20.2 ms; display runs ~4–5 ms above network RTT), and a KL server cannot give 19 ms from here (KL floor 37.6 ms). So either the reading was not a match-RTT value, or there is a facility closer than any capture has landed on. **Re-run the arm with a capture before treating 19 ms as a fact.**
+   - Design and procedure: `docs/experiment-restart-vs-host.md`.
 2. **What determines which provider you get within a city?** Solo brawl → Zenlayer; solo classic → CDS; hosted customs → Omni Cloud. Mode, party, load, or random — unknown.
 3. **What triggers the 30190 probe sweep, and does its output drive placement?** Never observed during a match.
 4. **Is there repeatable way to preview/bias the server?** Currently no: not connected at accept, connected at draft.
@@ -171,7 +179,20 @@ Commit style: Conventional Commits, small, imperative, no AI attribution, push t
 
 ## 8. How to continue
 
-**The cheapest next test (highest value):** the restart hypothesis. Three matches, each classified in ~5 seconds at **draft pick** using the root daemon (no full match needed if the user bails at draft):
+**Read `docs/experiment-restart-vs-host.md` first.** It takes the restart-vs-host
+question, fixes the confounds in the three-match sketch below, and adds a
+no-match prerequisite test (does the port-30190 sweep fire on app launch?) that
+decides whether the restart hypothesis even has a mechanism.
+
+**Tooling for it is built:** `python tools/draft_probe.py start|peek|finish`,
+which captures through the root daemon and names the endpoint at draft pick.
+`finish` appends to `data/matches.csv`. It was validated offline against all
+four archived captures (each classified back to the endpoint recorded in §6).
+
+**The original three-match sketch** (kept for reference; the arms are confounded
+— see §2 of the experiment doc): three matches, each classified in ~5 seconds
+at **draft pick** using the root daemon (no full match needed if the user bails
+at draft):
 
 | # | Condition | Question |
 |---|---|---|
@@ -179,7 +200,8 @@ Commit style: Conventional Commits, small, imperative, no AI attribution, push t
 | 2 | user hosts, **after app restart** | does restart change the server? |
 | 3 | friend hosts | does host identity change it? |
 
-Classification command (via the daemon, dump to `/sdcard/r.txt`):
+Classification command (fallback when a pcap is inconvenient — note mDNS
+`:5353` sits inside the 5xxx band, hence the `grep -v 5353`):
 
 ```sh
 grep -i udp /proc/net/nf_conntrack 2>/dev/null | grep -E "dport=5[0-9][0-9][0-9] " | grep -v 5353

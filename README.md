@@ -15,4 +15,10 @@ root setup, tooling, measured findings, open questions, and how to continue.
 **Capture parser:** [`tools/parse_pcap.py`](tools/parse_pcap.py) — PCAPdroid or
 tcpdump captures, SLL2-aware, reports the interface each flow used.
 
+**Draft-pick classifier:** [`tools/draft_probe.py`](tools/draft_probe.py) — starts
+a labelled capture through the root daemon and names the match endpoint at draft
+pick, before a match is played.
+
+**Next experiment:** [`docs/experiment-restart-vs-host.md`](docs/experiment-restart-vs-host.md).
+
 Commits: Conventional Commits, small, `main`, no AI attribution.
