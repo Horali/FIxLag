@@ -115,28 +115,40 @@ the 19 was never a measurement of anything.
 
 ---
 
-## 3. Do the free test first: does the probe sweep fire on app launch?
+## 3. The prerequisite test — answered 2026-11-24
 
-The restart hypothesis needs a mechanism. The only plausible one: the client
+The restart hypothesis needed a mechanism. The only plausible one: the client
 re-runs its port-30190 latency sweep on startup and feeds fresh measurements
 into placement, so a restart changes the input.
 
-That is testable in **two minutes, with no match and no friends**.
+**Result: it does fire, and only on a cold start.** Three runs on the phone,
+Wi-Fi only, timestamps from the phone (full detail in plan.md §5.13):
+
+| Run | Condition | 30190 packets | First after launch |
+|---|---|---|---|
+| `LAUNCH` | cold start | 21 (12 targets) | +11.3 s |
+| `FORE` | HOME 6 s, foreground again, no restart | **0** | — |
+| `COLD2` | force-stop, cold start | 21 (12 targets) | +11.9 s |
+
+Each cold start sends 10 request/response pairs to one nearby Indonesian
+candidate (~200 ms apart), then one packet a second to 11 regional servers, and
+**the list is resampled per launch** — 9 of 12 targets shared between the two
+runs, the rest different.
+
+So the mechanism is real: restarting re-measures the regional candidate list at
+the moment you are about to queue. **Arm C is worth running.** What is still
+unknown — and what C tests — is whether the matchmaker weights those
+measurements at all.
+
+The procedure below is kept because the same capture shape is useful for the
+other known trigger (return to lobby after a match) and because each arm's
+capture covers it anyway.
 
 ```
 python tools/draft_probe.py start --label LAUNCH --seconds 300
 # force-stop MLBB, then launch it, sit in the lobby for ~90 s
 python tools/draft_probe.py peek --label LAUNCH
-python tools/draft_probe.py finish --label LAUNCH --note "sweep on launch?"
 ```
-
-| Result | Reading | Consequence |
-|---|---|---|
-| 30190 packets appear within seconds of the launch | restart has a mechanism | run arm C |
-| no 30190 packets, only lobby TCP | restart has no known mechanism | deprioritise the restart hypothesis; run A/B/D only |
-
-This also chips at open question 3 in the handoff (what triggers the sweep),
-which is worth knowing regardless of how this experiment ends.
 
 ---
 

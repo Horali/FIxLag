@@ -28,7 +28,7 @@ A personal, zero-cost investigation into why the user's Mobile Legends ping is i
 | Quality varies **per individual IP**, even inside one /24 (e.g. `169.53.7.247` good, `169.53.7.245` bad) | **Measured** |
 | **Network Boost is adaptive multipath** — duplicates the match over Wi-Fi + cellular when comparable, collapses to the better link when one is clearly worse | **Measured** |
 | Match server is **not** connected at the accept screen, but **is** connected at **draft pick** | **Measured** |
-| The port-30190 probe sweep is **sporadic**; it did not fire during a 25-min capture containing a full match. Trigger unknown | **Measured (negative)** |
+| The port-30190 probe sweep fires on **cold app start** (+11 s after launch), not on foregrounding; resampled each launch | **Measured** (2 cold starts, 1 warm resume) |
 | Nothing client-side can force which server you get | **Established** |
 
 **The bottom line:** the ping you get is the server you're given. The ~10 ms difference between "main" (Zenlayer Jakarta, 24.8 ms) and "sub-Indo" (CDS Global Cloud, 35.4 ms) is provider routing, measured three independent ways.
@@ -172,7 +172,7 @@ Commit style: Conventional Commits, small, imperative, no AI attribution, push t
    - **Caveat added 2026-11-24:** 19 ms displayed is below every floor ever measured from this phone (best Jakarta ICMP min is 20.2 ms; display runs ~4–5 ms above network RTT), and a KL server cannot give 19 ms from here (KL floor 37.6 ms). So either the reading was not a match-RTT value, or there is a facility closer than any capture has landed on. **Re-run the arm with a capture before treating 19 ms as a fact.**
    - Design and procedure: `docs/experiment-restart-vs-host.md`.
 2. **What determines which provider you get within a city?** Solo brawl → Zenlayer; solo classic → CDS; hosted customs → Omni Cloud. Mode, party, load, or random — unknown.
-3. **What triggers the 30190 probe sweep, and does its output drive placement?** Never observed during a match.
+3. **~~What triggers the 30190 probe sweep, and does its output drive placement?~~** **Trigger answered (2026-11-24, plan.md §5.13):** cold app start, ~11 s after launch, resampled each launch; warm resume produces nothing; post-match return to lobby also triggers it. **Still open:** whether the matchmaker weights those measurements. That is what arm C tests.
 4. **Is there repeatable way to preview/bias the server?** Currently no: not connected at accept, connected at draft.
 
 ---

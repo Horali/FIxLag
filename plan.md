@@ -673,6 +673,26 @@ Three independent methods now agree on the Wi-Fi RTT to this server: **ICMP 35.4
 
 **Two consequences.** First, Wi-Fi is the better link for this server (38.8 vs 46.9 ms median), so Network Boost's duplication is doing real work — it takes the Wi-Fi copy and uses cellular as a fallback. Second, the cellular tail (p90 130 ms vs 66 ms on Wi-Fi) is where the user's occasional 100 ms+ spikes come from.
 
+### 5.13 The port-30190 sweep fires on cold app start (measured 2026-11-24)
+
+The trigger of the sweep was open since §5.8. Three controlled runs answer it. Root `tcpdump -i any -s 96 'udp'` on the phone, Wi-Fi only (`wlan0` up, all `rmnet_data*` down), app force-stopped between cold runs, times taken from the phone's own clock.
+
+| Run | Condition | Packets to port 30190 | First probe after launch |
+|---|---|---|---|
+| `LAUNCH` | cold start | 21 (12 distinct targets) | **+11.3 s** |
+| `FORE` | HOME for 6 s, then foreground again, **no restart** | **0** | — |
+| `COLD2` | `am force-stop`, then cold start | 21 (12 distinct targets) | **+11.9 s** |
+
+**Shape in both cold runs.** Ten request/response pairs to **one** nearby Indonesian candidate, ~200 ms apart over ~2 s, then eleven single packets one second apart to regional servers. In `LAUNCH` the nearby candidate was `45.198.249.6`, in `COLD2` `45.198.249.9` — same /24, AS140401 PT Omni Cloud Indonesia, GeoIP Sulawesi. The replies are the same size as the requests, so these are round-trip measurements, not one-way notifications.
+
+**The target list is resampled per launch, not fixed.** The two cold starts shared 9 of 12 targets and differed in the rest (`45.198.249.6` vs `.9`, and an extra Bangkok Zenlayer address). Both lists mix Jakarta (Meteverse, Omni Cloud), Singapore (IBM, CDS), Bangkok, Sydney, Istanbul, the US, and the Netherlands.
+
+**What this settles.** The trigger is **app initialization**, not matchmaking and not foregrounding. This also explains the earlier negative result: the 25-minute capture in §5.12 contained no probes because the app was never restarted during it, while the sweeps recorded in §5.8 fired on the **return to lobby after a match**. Two triggers, both lobby-side, none during a match.
+
+**Why it matters for the restart question.** Until this run, "restarting the app flushes cached server-latency state" had no mechanism behind it. It does now: every cold start re-measures the regional candidate list at the moment you are about to queue, and the list is resampled each time. Whether the matchmaker *weights* those measurements is still unknown — that is what arm C of `docs/experiment-restart-vs-host.md` tests.
+
+**Caveats.** Two cold starts, one evening, one link (Wi-Fi only — cellular was down, so this says nothing about the multipath case). Enough to establish the trigger, not enough to characterise the list or the sampling rule.
+
 ---
 
 ## 6. Endpoint identification and classification
