@@ -141,25 +141,58 @@ def list_devices():
     return out
 
 
-def pick_serial(explicit):
-    if explicit:
-        return explicit
-    devs = [d for d in list_devices() if "unauthorized" not in d[1]]
-    if not devs:
-        raise SystemExit(
-            "no adb device. Plug the S25+ in and check `adb devices -l`.\n"
-            "Multiple devices are normal on this machine -- if more than one\n"
-            "shows up, pass --serial explicitly."
-        )
-    preferred = [d for d in devs if "SM_S936B" in d[1] or "SM-S936B" in d[1]]
-    if len(preferred) == 1:
-        return preferred[0][0]
+def listen_addresses():
+    """Parsed `adb mdns services` -- wireless debugging ports change constantly."""
+    p = run([str(ADB), "mdns", "services"], check=False)
+    out = []
+    for line in (p.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "_adb-tls-connect._tcp":
+            out.append(parts[2])
+    return out
+
+
+def rediscover(serial):
+    """Re-dial the phone over wireless debugging if the serial went stale.
+
+    The address and port both change: 192.168.1.6:43299, .17:40971, .17:46637
+    were all the same S25+ on one evening. A stale serial is expected, not an
+    error, so reconnect instead of failing.
+    """
+    devs = list_devices()
+    live = [d for d in devs if "offline" not in d[1]]
+    if serial:
+        for s, _line in live:
+            if s == serial:
+                return serial
+
+    if serial:
+        print("serial %s is gone; rediscovering over mDNS" % serial)
+    for hp in listen_addresses():
+        run([str(ADB), "connect", hp], check=False)
+    time.sleep(1)
+
+    devs = [d for d in list_devices() if "offline" not in d[1]]
+    if serial:
+        for s, _line in devs:
+            if s == serial:
+                return serial
+    s936 = [d for d in devs if "SM_S936B" in d[1] or "SM-S936B" in d[1]]
+    if len(s936) == 1:
+        if serial and s936[0][0] != serial:
+            print("using %s" % s936[0][0])
+        return s936[0][0]
     if len(devs) == 1:
         return devs[0][0]
     raise SystemExit(
-        "cannot choose a device; pass --serial. Attached:\n  "
-        + "\n  ".join(d[1] for d in devs)
+        "no usable adb device after rediscovery:\n  "
+        + ("\n  ".join(d[1] for d in devs) or "(none)")
+        + "\nWireless debugging may have dropped. Re-enable it, or plug in USB."
     )
+
+
+def pick_serial(explicit):
+    return rediscover(explicit)
 
 
 def root_run(serial, script, timeout=120, attempts=3):
@@ -486,6 +519,41 @@ def cmd_finish(args):
     print("logged to %s" % path)
 
 
+def cmd_watch(args):
+    """Poll a running capture until a match endpoint shows up."""
+    deadline = time.time() + args.timeout
+    serial = pick_serial(args.serial)
+    last = None
+    while time.time() < deadline:
+        try:
+            serial = pick_serial(serial)
+            local = pull(serial, args.label)
+            rep = classify(local)
+            elapsed = capture_seconds(serial, args.label)
+        except (SystemExit, subprocess.SubprocessError) as exc:
+            print("(transient: %s) retrying" % str(exc).splitlines()[0])
+            time.sleep(args.interval)
+            continue
+
+        if rep["primary"]:
+            print_report(rep, args.label, elapsed)
+            return
+        note = "no endpoint yet"
+        if rep["probes"]:
+            note += ", %d sweep target(s)" % len(rep["probes"])
+        line = "%s +%ss: %s" % (time.strftime("%H:%M:%S"), elapsed, note)
+        if line != last:
+            print(line)
+            last = line
+        if remote_done(serial, args.label):
+            print_report(rep, args.label, elapsed)
+            print("capture ended without a match endpoint.")
+            raise SystemExit(1)
+        time.sleep(args.interval)
+    print("timed out after %ds with no match endpoint." % args.timeout)
+    raise SystemExit(1)
+
+
 def cmd_classify(args):
     print_report(classify(args.pcap))
 
@@ -539,6 +607,13 @@ def main():
     p.add_argument("--party", help="party composition")
     p.add_argument("--note")
     p.set_defaults(func=cmd_finish)
+
+    p = sub.add_parser("watch", help="poll a running capture until the match server appears")
+    common(p)
+    p.add_argument("--label", required=True)
+    p.add_argument("--interval", type=int, default=20)
+    p.add_argument("--timeout", type=int, default=1800)
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("classify", help="classify an existing pcap")
     p.add_argument("pcap")
