@@ -1,0 +1,4 @@
+# Shell scripts run on the phone through `sh`; CRLF would break them there.
+*.sh text eol=lf
+*.py text eol=lf
+*.md text
