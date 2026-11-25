@@ -4,9 +4,9 @@ Runs a bounded packet capture on the phone through the root command daemon,
 pulls the pcap, and says which endpoint the match is on -- early enough to see
 it at draft pick instead of after a full match.
 
-The daemon (docs/handoff.md §3) is the only root channel on this device: adb
-shell is uid 2000 and cannot read conntrack or bind a raw socket. Every
-privileged action here goes through /sdcard/cmd.sh.
+Privileged commands run through `adb shell su -c` when the shell uid is on the
+KernelSU allowlist (it is, as of 2026-11-24), and fall back to the
+/sdcard/cmd.sh daemon when it is not.
 
 Usage:
     python tools/draft_probe.py devices
@@ -195,8 +195,36 @@ def pick_serial(explicit):
     return rediscover(explicit)
 
 
+def have_direct_root(serial):
+    """True when `su -c` works straight from adb shell.
+
+    Since 2026-11-24 the KernelSU allowlist also contains com.android.shell, so
+    uid 2000 gets root. Before that, only Termux was allowlisted and every
+    privileged command had to go through the /sdcard/cmd.sh daemon.
+    """
+    p = run(adb_base(serial) + ["shell", "su -c id"], check=False)
+    return "uid=0(root)" in (p.stdout or "")
+
+
 def root_run(serial, script, timeout=120, attempts=3):
-    """Run a shell script as root via the /sdcard/cmd.sh daemon."""
+    """Run a shell script as root, direct when possible, daemon otherwise."""
+    if have_direct_root(serial):
+        remote = "/data/local/tmp/mp_root.sh"
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False,
+                                        newline="\n") as f:
+            f.write(script.rstrip("\n") + "\n")
+            staged = f.name
+        try:
+            run(adb_base(serial) + ["push", staged, remote])
+            p = run(adb_base(serial) + ["shell", "su -c 'sh %s'" % remote],
+                    timeout=timeout, check=False)
+            run(adb_base(serial) + ["shell", "rm -f " + remote], check=False)
+            if p.returncode != 0 and p.stderr.strip():
+                print(p.stderr.strip())
+            return (p.stdout or "").rstrip("\n")
+        finally:
+            os.unlink(staged)
+
     marker = "MPMARK-%d" % int(time.time() * 1000)
     body = script.rstrip("\n") + "\necho %s\n" % marker
 

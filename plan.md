@@ -626,6 +626,8 @@ Adding a uid-2000 record requires the `ksud` daemon to write it, and on this lat
 
 **Verified through the daemon:** `conntrack` (live UDP flows), `tcpdump` 4.99.6, `iptables`, `ip route`, `ip addr`. Interfaces at time of writing: `wlan0` UP at `192.168.1.6/24`; all `rmnet_data*` DOWN (mobile data off).
 
+**Update 2026-11-25 — the allowlist was extended after all, and it worked.** `/data/adb/ksu/.allowlist` now holds two records, `com.termux` and **`com.android.shell`** (uid 2000, written 2026-11-24 14:35). `adb shell "su -c id"` returns `uid=0(root) context=u:r:ksu:s0` on both the USB and the TCP transport. The conclusion below that "shell `su` cannot be enabled" was true of the daemon-brokered path with a single-entry file; it did not survive an actual two-record file. The daemon is now a fallback, not the channel. Consequence worth stating: any adb access to this phone is root access.
+
 ### 5.12 Network Boost is multipath packet duplication (2026-11-23)
 
 A solo-classic match was captured with `tcpdump` (no proxy, SLL2 link type with per-packet interface attribution). The game was sending the **same match traffic over Wi-Fi and cellular simultaneously**:
