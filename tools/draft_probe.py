@@ -529,6 +529,23 @@ def cmd_peek(args):
         print("(capture has already ended)")
 
 
+CSV_HEADER = ["ts", "label", "host", "displayed_ping_ms", "endpoint", "port",
+              "provider", "city_geo", "confidence", "ifaces", "out_pkts",
+              "in_pkts", "duration_s", "other_endpoints", "party", "note"]
+
+
+def append_match(row):
+    DATA.mkdir(exist_ok=True)
+    path = DATA / "matches.csv"
+    new = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(CSV_HEADER)
+        w.writerow([row.get(k, "") for k in CSV_HEADER])
+    return path
+
+
 def cmd_finish(args):
     serial = pick_serial(args.serial)
     root_run(serial, "p=$(pidof tcpdump); [ -n \"$p\" ] && kill $p; "
@@ -542,25 +559,33 @@ def cmd_finish(args):
     prim = rep["primary"]
     others = ";".join("%s:%d" % (c["ip"], c["port"])
                       for c in rep["candidates"] if c is not prim)
-    DATA.mkdir(exist_ok=True)
-    path = DATA / "matches.csv"
-    new = not path.exists()
-    with path.open("a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if new:
-            w.writerow(["ts", "label", "host", "displayed_ping_ms", "endpoint",
-                        "port", "provider", "city_geo", "confidence", "ifaces",
-                        "out_pkts", "in_pkts", "duration_s", "other_endpoints",
-                        "party", "note"])
-        w.writerow([
-            datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-            args.label, args.host or "",
-            args.ping if args.ping is not None else "",
-            prim["ip"], prim["port"], prim["provider"], prim["city"],
-            prim["source"], ",".join(prim["ifaces"]), prim["out"], prim["in"],
-            round(prim["dur"], 1), others, args.party or "", args.note or "",
-        ])
+    path = append_match({
+        "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "label": args.label, "host": args.host or "",
+        "displayed_ping_ms": args.ping if args.ping is not None else "",
+        "endpoint": prim["ip"], "port": prim["port"],
+        "provider": prim["provider"], "city_geo": prim["city"],
+        "confidence": prim["source"], "ifaces": ",".join(prim["ifaces"]),
+        "out_pkts": prim["out"], "in_pkts": prim["in"],
+        "duration_s": round(prim["dur"], 1), "other_endpoints": others,
+        "party": args.party or "", "note": args.note or "",
+    })
     print("logged to %s" % path)
+
+
+def cmd_log(args):
+    """Append a match row from values you already know, no capture needed."""
+    prov, city, note, source = describe(args.endpoint)
+    path = append_match({
+        "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "label": args.label, "host": args.host or "",
+        "displayed_ping_ms": args.ping if args.ping is not None else "",
+        "endpoint": args.endpoint, "port": args.port,
+        "provider": prov, "city_geo": city, "confidence": source,
+        "party": args.party or "",
+        "note": args.note or note,
+    })
+    print("%s:%d  %s / %s  -> %s" % (args.endpoint, args.port, prov, city, path))
 
 
 def cmd_watch(args):
@@ -658,6 +683,17 @@ def main():
     p.add_argument("--interval", type=int, default=20)
     p.add_argument("--timeout", type=int, default=1800)
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("log", help="append a match row without touching the device")
+    common(p)
+    p.add_argument("--label", required=True)
+    p.add_argument("--endpoint", required=True)
+    p.add_argument("--port", type=int, required=True)
+    p.add_argument("--host")
+    p.add_argument("--ping", type=float, help="displayed in-game ping, ms")
+    p.add_argument("--party")
+    p.add_argument("--note")
+    p.set_defaults(func=cmd_log)
 
     p = sub.add_parser("classify", help="classify an existing pcap")
     p.add_argument("pcap")

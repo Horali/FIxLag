@@ -695,6 +695,38 @@ The trigger of the sweep was open since §5.8. Three controlled runs answer it. 
 
 **Caveats.** Two cold starts, one evening, one link (Wi-Fi only — cellular was down, so this says nothing about the multipath case). Enough to establish the trigger, not enough to characterise the list or the sampling rule.
 
+### 5.14 Five party matches in one evening: one provider, five machines (measured 2026-11-25)
+
+Four matches captured with `tcpdump` on the phone, both links up (Network Boost active), party composition and host recorded per match.
+
+| # | Party | Host | Endpoint | Port | ICMP min / avg | Displayed |
+|---|---|---|---|---|---|---|
+| 1 | 4q — me (ID), MY, IN, SG | **me** | `164.52.38.84` | 5005 | 30.7 / 33.4 | **30–35** |
+| 2 | 5q — me (ID), **2× MY (MY host)**, SG, IN | MY friend | `164.52.109.153` | 5007 | 33.8 / 36.9 | not recorded |
+| 3 | same 5q lobby | MY friend | `164.52.38.98` | 5007 | 32.7 / 34.4 | not recorded |
+| 4 | trio — me (ID), IN, SG | **me** | `164.52.73.243` | 5008 | pending | pending |
+
+**All five endpoints are CDS Global Cloud, all inside `164.52.0.0/16`, five distinct machines.** No match in the evening ran on Zenlayer, Omni Cloud, or Meteverse. Every one of them used **both links simultaneously** (Network Boost duplication), without exception.
+
+**What this does to the "host's country sets the region" rule.** It breaks it. §5.8 concluded that rule from a single capture in which a **Malaysian-hosted brawl** landed on Zenlayer Kuala Lumpur. Here, two matches hosted by the Malaysian friend — with two Malays in a five-stack — ran on CDS, exactly like the match the user hosted herself. Host identity changed nothing about provider or region across four matches.
+
+The most likely reading is that **mode**, not host, picks the pool:
+
+| Mode (observed so far) | Provider pool seen |
+|---|---|
+| Solo brawl | Zenlayer Jakarta (§5.8) |
+| Custom room, foreign friend | Omni Cloud Jakarta (§5.8) |
+| Brawl hosted by the MY friend | Zenlayer Kuala Lumpur (§5.8) |
+| **Classic party, 4q/5q/trio** | **CDS Global Cloud, `164.52.x`** (this section) |
+
+That would make §5.8's KL result a mode effect with a one-sample host correlation, not proof of host control. It needs one more brawl to confirm — but the rule as written should no longer be quoted.
+
+**Where "sub-Indo" probably lives.** Every `164.52.x` prefix geolocates to Singapore, and 30–37 ms is a plausible Surabaya→Singapore path. If that holds up, the user's 30–45 ms "sub-Indo" band may be **matches hosted in Singapore for an Indonesian-pool lobby** — not a worse Indonesian facility. The alternative is a CDS Jakarta facility whose prefixes also geolocate to Singapore (the `148.153.x` ambiguity in §5.12 is the same problem). Distinguishing them needs a traceroute to each, which is the next cheap test.
+
+**Two mechanics confirmed again.** The port-30190 sweep fired on the return to lobby at +1202 s (9 targets) — the second documented trigger, after cold start. And the match port range should stay **5000–5999**: this evening produced 5005, 5007 and 5008, none of which were in the original list.
+
+**Caveat.** The user changed Wi-Fi network and made a network-side edit before match 1, so displayed-ping comparisons across this evening are weaker than the endpoint comparisons. Endpoint identity does not care about the link.
+
 ---
 
 ## 6. Endpoint identification and classification

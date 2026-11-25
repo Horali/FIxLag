@@ -23,7 +23,7 @@ A personal, zero-cost investigation into why the user's Mobile Legends ping is i
 |---|---|
 | Ping differences are **server-side**, not the local link | **Measured** |
 | Lobby ping measures a **Singapore** gateway and does **not** predict in-game ping | **Measured** |
-| The **host's country** sets the server region (ID host → Jakarta, MY host → KL) | **Measured** |
+| The **host's country** sets the server region (ID host → Jakarta, MY host → KL) | **Weakened 2026-11-25** — four party matches, two hosted by a MY friend, all landed on CDS 164.52.x. Mode may be the real variable. See plan.md §5.14 |
 | Each city has **multiple providers** (Jakarta: Zenlayer, Omni Cloud, CDS Global Cloud, Meteverse) with different quality | **Measured** |
 | Quality varies **per individual IP**, even inside one /24 (e.g. `169.53.7.247` good, `169.53.7.245` bad) | **Measured** |
 | **Network Boost is adaptive multipath** — duplicates the match over Wi-Fi + cellular when comparable, collapses to the better link when one is clearly worse | **Measured** |
