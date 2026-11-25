@@ -178,10 +178,23 @@ def rediscover(serial):
             if s == serial:
                 return serial
     s936 = [d for d in devs if "SM_S936B" in d[1] or "SM-S936B" in d[1]]
-    if len(s936) == 1:
-        if serial and s936[0][0] != serial:
-            print("using %s" % s936[0][0])
-        return s936[0][0]
+    if len(s936) > 1:
+        # The same phone can be attached over USB, classic tcpip and the
+        # wireless-debugging TLS port at once. Prefer the cable: a hardware
+        # serial does not change when the phone's IP does. Then the fixed
+        # tcpip port, because the TLS port rotates on every reconnect.
+        wired = [d for d in s936 if ":" not in d[0]]
+        if wired:
+            s936 = wired
+        else:
+            fixed = [d for d in s936 if d[0].endswith(":5555")]
+            if fixed:
+                s936 = fixed
+    if s936:
+        chosen = s936[0][0]
+        if serial and chosen != serial:
+            print("using %s" % chosen)
+        return chosen
     if len(devs) == 1:
         return devs[0][0]
     raise SystemExit(
