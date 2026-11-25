@@ -108,6 +108,9 @@ AUX_IGNORED_PORTS = {53, 443, 853, 123}
 
 IFACE_NAMES = dict(pp.IFACE_NAMES)
 IFACE_NAMES.update({1: "wlan0", 2: "rmnet_data0"})
+# Verified on the S25+ 2026-11-25: wlan0=44, rmnet_data0=63. The older 62 was
+# wrong for this device, which is why live captures printed "if63".
+IFACE_NAMES.update({63: "rmnet_data0"})
 
 
 # --------------------------------------------------------------------------- #
