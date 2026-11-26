@@ -113,6 +113,7 @@ class ReassembledKcpMessage:
     sn_end: int
     comp: int
     payload: bytes
+    complete: bool = True
 
 
 class KcpStreamReassembler:
@@ -210,6 +211,7 @@ class KcpStreamReassembler:
                         sn_end=sn_end,
                         comp=comp,
                         payload=decoded,
+                        complete=True,
                     )
                 )
         return ready

@@ -6,8 +6,10 @@ from .pcap_reader import IncrementalPcapReader, InvalidPcapMagicError, UdpPacket
 from .protocol import (
     extract_events_from_struct_list,
     extract_events_from_tick_bytes,
+    global_pos_to_camp_seat,
     lz4_decompress_raw,
     parse_chat_body,
+    parse_help_select_body,
     parse_mlbb_struct,
     read_varint,
 )
@@ -23,9 +25,11 @@ __all__ = [
     "extract_events_from_struct_list",
     "extract_events_from_tick_bytes",
     "extract_ticks_from_subframe",
+    "global_pos_to_camp_seat",
     "lz4_decompress_raw",
     "parse_0175_subframes",
     "parse_chat_body",
+    "parse_help_select_body",
     "parse_kcp_datagram",
     "parse_mlbb_struct",
     "read_varint",

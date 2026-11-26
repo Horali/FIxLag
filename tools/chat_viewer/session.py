@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import threading
 import time
@@ -13,8 +14,16 @@ from typing import Any
 from .battle import BattleTickProcessor, extract_ticks_from_subframe, parse_0175_subframes
 from .kcp import KcpStreamReassembler, ReassembledKcpMessage
 from .pcap_reader import UdpPacket
-from .protocol import extract_events_from_struct_list, parse_chat_body, parse_mlbb_struct, read_varint
+from .protocol import (
+    extract_events_from_struct_list,
+    global_pos_to_camp_seat,
+    parse_chat_body,
+    parse_mlbb_struct,
+    read_varint,
+)
 from .templates import TemplateResolver
+
+logger = logging.getLogger(__name__)
 
 MATCH_PORT_LO = 5000
 MATCH_PORT_HI = 5999
@@ -160,6 +169,11 @@ class MatchSession:
     chat_dedup_keys: set[tuple[Any, ...]] = field(default_factory=set)
     pending_outbound_chats: list[tuple[float, int, str]] = field(default_factory=list)
     reconnect_expected: bool = False
+    attribution_frozen: bool = False
+    frozen_at_tick: int | None = None
+    swapped_uids: set[int] = field(default_factory=set)
+    swap_history: list[dict[str, Any]] = field(default_factory=list)
+    anomalies: list[dict[str, Any]] = field(default_factory=list)
     _next_seq_id: int = 1
     _next_gap_seq: int = 1
 
@@ -191,6 +205,8 @@ class MatchSession:
             "convs": sorted(self.convs),
             "local_uid": self.local_uid,
             "local_camp": self.local_camp,
+            "attribution_frozen": self.attribution_frozen,
+            "frozen_at_tick": self.frozen_at_tick,
             "players": [
                 {
                     "uid": p.uid,
@@ -203,6 +219,8 @@ class MatchSession:
             ],
             "event_count": len(self.events),
             "gaps": [g.to_dict() for g in self.gaps],
+            "swap_history": list(self.swap_history),
+            "anomalies": list(self.anomalies),
             "first_ts": self.first_ts,
             "last_ts": self.last_ts,
         }
@@ -512,6 +530,8 @@ class SessionRouter:
         return self._new_match(sess.ep, ts, battle_id=battle_id)
 
     def _on_kcp_message(self, msg: ReassembledKcpMessage) -> None:
+        if not msg.complete:
+            return
         sess = self._get_or_create(msg.ep, msg.ts)
         conv_hex = msg.conv.hex()
         data = msg.payload
@@ -589,6 +609,7 @@ class SessionRouter:
         if not isinstance(players, list):
             return
 
+        # NOTE: mid=1202 player list is sorted by uid, not by seat; always read field ('v', 2).
         changed = False
         for item in players:
             if not isinstance(item, dict):
@@ -603,6 +624,14 @@ class SessionRouter:
             seat_val = seat if isinstance(seat, int) else 0
             name = name_raw.decode("utf-8", "replace") if isinstance(name_raw, bytes) else ""
             existing = sess.players_by_uid.get(uid)
+            if sess.attribution_frozen or uid in sess.swapped_uids:
+                if existing is None:
+                    sess.players_by_uid[uid] = PlayerInfo(uid=uid, name=name)
+                    changed = True
+                elif name and not existing.name:
+                    existing.name = name
+                    changed = True
+                continue
             if existing is None:
                 info = PlayerInfo(uid=uid, name=name, camp=camp_val, seat=seat_val)
                 sess.players_by_uid[uid] = info
@@ -619,11 +648,191 @@ class SessionRouter:
                     changed = True
             if camp_val is not None:
                 slot = (camp_val << 4) | seat_val
-                sess.slot_to_uid.setdefault(slot, uid)
+                if slot not in sess.slot_to_uid:
+                    sess.slot_to_uid[slot] = uid
+                    changed = True
                 sess.slot_to_camp[slot] = camp_val
 
         if changed:
             self._refresh_local_attribution(sess)
+
+    @staticmethod
+    def _set_player_slot(sess: MatchSession, uid: int, camp: int, seat: int) -> None:
+        slot = (camp << 4) | seat
+        for s_key in [k for k, v in sess.slot_to_uid.items() if v == uid and k != slot]:
+            del sess.slot_to_uid[s_key]
+        prev_uid = sess.slot_to_uid.get(slot)
+        if prev_uid is not None and prev_uid != uid:
+            prev_player = sess.players_by_uid.get(prev_uid)
+            if prev_player is not None and prev_player.slot == slot:
+                prev_player.seat = None
+        player = sess.players_by_uid.get(uid)
+        if player is None:
+            sess.players_by_uid[uid] = PlayerInfo(uid=uid, camp=camp, seat=seat)
+        else:
+            player.camp = camp
+            player.seat = seat
+        sess.slot_to_uid[slot] = uid
+        sess.slot_to_camp[slot] = camp
+
+    def _resolve_uid_camp_seat(self, sess: MatchSession, uid: int) -> tuple[int, int] | None:
+        player = sess.players_by_uid.get(uid)
+        if player is not None and player.camp in (1, 2) and player.seat is not None:
+            return player.camp, player.seat
+        for s_key, s_uid in sess.slot_to_uid.items():
+            if s_uid == uid:
+                c = s_key >> 4
+                if c in (1, 2):
+                    return c, s_key & 0x0F
+        return None
+
+    def _handle_ready_select_0x36(self, sess: MatchSession, ev: dict[str, Any]) -> None:
+        uid = ev.get("uid")
+        camp = ev.get("camp")
+        seat = ev.get("seat")
+        slot = ev.get("slot")
+        if isinstance(uid, int) and camp in (1, 2) and isinstance(seat, int) and 0 <= seat <= 4:
+            norm_slot = (camp << 4) | seat
+            sess.slot_to_camp[norm_slot] = camp
+            if sess.attribution_frozen or uid in sess.swapped_uids:
+                return
+            existing = sess.players_by_uid.get(uid)
+            changed = False
+            if existing is None:
+                sess.players_by_uid[uid] = PlayerInfo(uid=uid, camp=camp, seat=seat)
+                changed = True
+            else:
+                if existing.camp is None:
+                    existing.camp = camp
+                    changed = True
+                if existing.seat is None:
+                    existing.seat = seat
+                    changed = True
+            if norm_slot not in sess.slot_to_uid:
+                sess.slot_to_uid[norm_slot] = uid
+                changed = True
+            if changed:
+                self._refresh_local_attribution(sess)
+        elif isinstance(slot, int):
+            camp_hint = slot >> 4
+            if camp_hint in (1, 2):
+                sess.slot_to_camp[slot] = camp_hint
+
+    def _handle_help_select_0x45(
+        self,
+        sess: MatchSession,
+        *,
+        ts: float,
+        phase: str,
+        tick: int | None,
+        ev: dict[str, Any],
+    ) -> None:
+        req_uid = ev.get("req_uid")
+        ack_uid = ev.get("ack_uid")
+        hero_id = ev.get("hero_id")
+        req_pos = ev.get("req_pos")
+        ack_pos = ev.get("ack_pos")
+        if not isinstance(req_uid, int) or not isinstance(ack_uid, int):
+            return
+
+        if sess.attribution_frozen:
+            msg = (
+                f"Ignoring post-freeze ev=0x45 swap ({req_uid} <-> {ack_uid}) "
+                f"after battle freeze at tick {sess.frozen_at_tick}"
+            )
+            logger.warning("%s (match=%s, phase=%s, tick=%s)", msg, sess.match_id, phase, tick)
+            sess.anomalies.append(
+                {
+                    "kind": "post_freeze_swap",
+                    "ts": ts,
+                    "phase": phase,
+                    "tick": tick,
+                    "req_uid": req_uid,
+                    "ack_uid": ack_uid,
+                    "hero_id": hero_id,
+                    "req_pos": req_pos,
+                    "ack_pos": ack_pos,
+                    "message": msg,
+                }
+            )
+            self.store.publish("match_update", sess.summary_dict())
+            return
+
+        req_cs = global_pos_to_camp_seat(req_pos) if isinstance(req_pos, int) else None
+        ack_cs = global_pos_to_camp_seat(ack_pos) if isinstance(ack_pos, int) else None
+        if req_cs is not None and ack_cs is not None:
+            req_old_camp, req_old_seat = req_cs
+            ack_old_camp, ack_old_seat = ack_cs
+        else:
+            req_cur = self._resolve_uid_camp_seat(sess, req_uid)
+            ack_cur = self._resolve_uid_camp_seat(sess, ack_uid)
+            if req_cur is None or ack_cur is None:
+                msg = f"Unresolved ev=0x45 swap ({req_uid} <-> {ack_uid}): missing seat positions"
+                logger.warning("%s (match=%s)", msg, sess.match_id)
+                sess.anomalies.append(
+                    {
+                        "kind": "unresolved_swap",
+                        "ts": ts,
+                        "phase": phase,
+                        "tick": tick,
+                        "req_uid": req_uid,
+                        "ack_uid": ack_uid,
+                        "hero_id": hero_id,
+                        "req_pos": req_pos,
+                        "ack_pos": ack_pos,
+                        "message": msg,
+                    }
+                )
+                return
+            req_old_camp, req_old_seat = req_cur
+            ack_old_camp, ack_old_seat = ack_cur
+
+        req_old_slot = (req_old_camp << 4) | req_old_seat
+        ack_old_slot = (ack_old_camp << 4) | ack_old_seat
+        new_req_slot = ack_old_slot
+        new_ack_slot = req_old_slot
+
+        if sess.slot_to_uid.get(new_req_slot) == req_uid and sess.slot_to_uid.get(new_ack_slot) == ack_uid:
+            return
+
+        # Clear any stale slot pointers for both swapping players before assigning targets.
+        for s_key in [k for k, v in sess.slot_to_uid.items() if v in (req_uid, ack_uid)]:
+            del sess.slot_to_uid[s_key]
+
+        req_player = sess.players_by_uid.get(req_uid)
+        if req_player is None:
+            sess.players_by_uid[req_uid] = PlayerInfo(uid=req_uid, camp=ack_old_camp, seat=ack_old_seat)
+        else:
+            req_player.camp = ack_old_camp
+            req_player.seat = ack_old_seat
+
+        ack_player = sess.players_by_uid.get(ack_uid)
+        if ack_player is None:
+            sess.players_by_uid[ack_uid] = PlayerInfo(uid=ack_uid, camp=req_old_camp, seat=req_old_seat)
+        else:
+            ack_player.camp = req_old_camp
+            ack_player.seat = req_old_seat
+
+        sess.slot_to_uid[new_req_slot] = req_uid
+        sess.slot_to_camp[new_req_slot] = ack_old_camp
+        sess.slot_to_uid[new_ack_slot] = ack_uid
+        sess.slot_to_camp[new_ack_slot] = req_old_camp
+        sess.swapped_uids.add(req_uid)
+        sess.swapped_uids.add(ack_uid)
+        sess.swap_history.append(
+            {
+                "ts": ts,
+                "phase": phase,
+                "req_uid": req_uid,
+                "ack_uid": ack_uid,
+                "hero_id": hero_id,
+                "req_old_slot": req_old_slot,
+                "req_new_slot": new_req_slot,
+                "ack_old_slot": ack_old_slot,
+                "ack_new_slot": new_ack_slot,
+            }
+        )
+        self.store.publish("match_update", sess.summary_dict())
 
     def _handle_room_1101(self, sess: MatchSession, ts: float, data: bytes) -> None:
         m = re.search(rb"\x03(.)\x46", data)
@@ -634,8 +843,18 @@ class SessionRouter:
             ln, pos = read_varint(data, m.end())
         except ValueError:
             return
+        if pos + ln > len(data):
+            return
         inner = data[pos : pos + ln]
         if not inner or inner[0] != 0x70:
+            return
+
+        try:
+            st, _ = parse_mlbb_struct(inner, 1, require_terminator=True)
+        except ValueError:
+            return
+        items = st.get(("l", 1))
+        if not isinstance(items, list):
             return
 
         if phase_byte == 0x02:
@@ -651,18 +870,16 @@ class SessionRouter:
         else:
             phase_name = sess.phase.lower() if sess.phase != "IDLE" else "draft"
 
-        try:
-            st, _ = parse_mlbb_struct(inner, 1)
-        except ValueError:
-            return
-        items = st.get(("l", 1))
-        if not isinstance(items, list):
-            return
-
         for ev in extract_events_from_struct_list(items):
             ev_type = ev.get("ev_type")
+            if ev_type == 0x45:
+                self._handle_help_select_0x45(sess, ts=ts, phase=phase_name, tick=None, ev=ev)
+                continue
+            if ev_type == 0x36:
+                self._handle_ready_select_0x36(sess, ev)
+                continue
             slot = ev.get("slot")
-            if ev_type in (0x36, 0x0B) and isinstance(slot, int):
+            if ev_type == 0x0B and isinstance(slot, int):
                 camp = slot >> 4
                 if camp in (1, 2):
                     sess.slot_to_camp[slot] = camp
@@ -715,7 +932,13 @@ class SessionRouter:
 
                 if sess.phase != "BATTLE":
                     sess.phase = "BATTLE"
+                    if not sess.attribution_frozen:
+                        sess.attribution_frozen = True
+                        sess.frozen_at_tick = tick_idx
                     self.store.publish("match_update", sess.summary_dict())
+                elif not sess.attribution_frozen:
+                    sess.attribution_frozen = True
+                    sess.frozen_at_tick = tick_idx
                 sess.last_ts = max(sess.last_ts, ts)
 
                 for out in sess.battle.on_tick(ts, tick_idx, mode, t_payload):
@@ -759,8 +982,16 @@ class SessionRouter:
                     elif out.kind == "events":
                         for ev in out.events:
                             ev_type = ev.get("ev_type")
+                            if ev_type == 0x45:
+                                self._handle_help_select_0x45(
+                                    sess, ts=out.ts, phase="battle", tick=out.tick, ev=ev
+                                )
+                                continue
+                            if ev_type == 0x36:
+                                self._handle_ready_select_0x36(sess, ev)
+                                continue
                             slot = ev.get("slot")
-                            if ev_type in (0x36, 0x0B) and isinstance(slot, int):
+                            if ev_type == 0x0B and isinstance(slot, int):
                                 camp = slot >> 4
                                 if camp in (1, 2):
                                     sess.slot_to_camp[slot] = camp
@@ -814,7 +1045,37 @@ class SessionRouter:
 
         uid = ev_uid
         if uid is not None and slot_val is not None:
-            sess.slot_to_uid[slot_val] = uid
+            prev_uid = sess.slot_to_uid.get(slot_val)
+            if prev_uid is not None and prev_uid != uid:
+                msg = (
+                    f"Slot 0x{slot_val:02x} attribution mismatch: roster had uid={prev_uid}, "
+                    f"msg_uid has uid={uid} (phase={phase}, tick={tick}, frozen={sess.attribution_frozen})"
+                )
+                logger.warning("%s (match=%s)", msg, sess.match_id)
+                sess.anomalies.append(
+                    {
+                        "kind": "slot_uid_mismatch",
+                        "ts": ts,
+                        "phase": phase,
+                        "tick": tick,
+                        "slot": slot_val,
+                        "expected_uid": prev_uid,
+                        "actual_uid": uid,
+                        "frozen": sess.attribution_frozen,
+                        "message": msg,
+                    }
+                )
+                if not sess.attribution_frozen:
+                    override_camp = slot_val >> 4
+                    if override_camp in (1, 2):
+                        self._set_player_slot(sess, uid, override_camp, slot_val & 0x0F)
+                    else:
+                        sess.slot_to_uid[slot_val] = uid
+                    sess.swapped_uids.add(prev_uid)
+                    sess.swapped_uids.add(uid)
+                    self.store.publish("match_update", sess.summary_dict())
+            elif prev_uid is None:
+                sess.slot_to_uid[slot_val] = uid
         elif uid is None and slot_val is not None:
             uid = sess.slot_to_uid.get(slot_val)
 

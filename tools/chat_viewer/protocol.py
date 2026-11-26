@@ -97,6 +97,8 @@ def _parse_collection_item(
     pos: int,
     elem_tag: int,
     max_depth: int,
+    *,
+    require_terminator: bool = False,
 ) -> tuple[object, int]:
     ew = elem_tag >> 4
     if ew in (0, 1, 2, 3):
@@ -107,7 +109,7 @@ def _parse_collection_item(
             raise ValueError("truncated list/map bytes")
         return bytes(buf[pos : pos + ln]), pos + ln
     if ew == 7:
-        return parse_mlbb_struct(buf, pos, max_depth - 1)
+        return parse_mlbb_struct(buf, pos, max_depth - 1, require_terminator=require_terminator)
     raise ValueError(f"unsupported collection element tag {elem_tag:#x}")
 
 
@@ -115,6 +117,8 @@ def parse_mlbb_struct(
     buf: bytes | bytearray | memoryview,
     pos: int,
     max_depth: int = 16,
+    *,
+    require_terminator: bool = False,
 ) -> tuple[dict[tuple[str, int], object], int]:
     """Parse an MLBB TLV struct body starting immediately after the 0x70 tag."""
     if max_depth <= 0:
@@ -148,7 +152,9 @@ def parse_mlbb_struct(
                     raise ValueError("truncated list element tag")
                 et = buf[pos]
                 pos += 1
-                item, pos = _parse_collection_item(buf, pos, et, max_depth)
+                item, pos = _parse_collection_item(
+                    buf, pos, et, max_depth, require_terminator=require_terminator
+                )
                 items.append(item)
             fields[("l", fnum)] = items
         elif wire == 6:
@@ -159,20 +165,93 @@ def parse_mlbb_struct(
                     raise ValueError("truncated map key tag")
                 kt = buf[pos]
                 pos += 1
-                k, pos = _parse_collection_item(buf, pos, kt, max_depth)
+                k, pos = _parse_collection_item(
+                    buf, pos, kt, max_depth, require_terminator=require_terminator
+                )
                 if pos >= n:
                     raise ValueError("truncated map value tag")
                 vt = buf[pos]
                 pos += 1
-                v, pos = _parse_collection_item(buf, pos, vt, max_depth)
+                v, pos = _parse_collection_item(
+                    buf, pos, vt, max_depth, require_terminator=require_terminator
+                )
                 pairs.append((k, v))
             fields[("m", fnum)] = pairs
         elif wire == 7:
-            sub, pos = parse_mlbb_struct(buf, pos, max_depth - 1)
+            sub, pos = parse_mlbb_struct(buf, pos, max_depth - 1, require_terminator=require_terminator)
             fields[("s", fnum)] = sub
         else:
             raise ValueError(f"unknown wire type {wire:#x} at pos {pos - 1}")
+    if require_terminator:
+        raise ValueError("missing struct terminator 0x80")
     return fields, pos
+
+
+def global_pos_to_camp_seat(pos: int) -> tuple[int, int] | None:
+    """Convert 1-based global draft seat (`1..5` Camp 1, `6..10` Camp 2) to `(camp, seat)`."""
+    if 1 <= pos <= 5:
+        return 1, pos - 1
+    if 6 <= pos <= 10:
+        return 2, pos - 6
+    return None
+
+
+def parse_help_select_body(body: bytes, *, sender_uid: int | None = None) -> dict[str, object] | None:
+    """Decode an `ev=0x45` (`OperType_Battle_HelpSelectHero`) seat/hero swap sub-event."""
+    if len(body) < 3 or body[0] != 0x70:
+        return None
+    try:
+        fields, _ = parse_mlbb_struct(body, 1, require_terminator=True)
+    except ValueError:
+        return None
+
+    req_uid = fields.get(("v", 0))
+    hero_id = fields.get(("v", 1))
+    req_pos = fields.get(("v", 2))
+    ack_uid = fields.get(("v", 3))
+    if not isinstance(ack_uid, int) and isinstance(sender_uid, int) and sender_uid > 0xFF:
+        ack_uid = sender_uid
+    ack_pos = fields.get(("v", 4))
+    req_skin = fields.get(("v", 5))
+    battle_skill = fields.get(("v", 6))
+
+    if not isinstance(req_uid, int) or not isinstance(ack_uid, int) or req_uid <= 0 or ack_uid <= 0:
+        return None
+    if req_uid == ack_uid:
+        return None
+
+    req_cs = global_pos_to_camp_seat(req_pos) if isinstance(req_pos, int) else None
+    ack_cs = global_pos_to_camp_seat(ack_pos) if isinstance(ack_pos, int) else None
+    return {
+        "ev_type": 0x45,
+        "req_uid": req_uid,
+        "ack_uid": ack_uid,
+        "hero_id": hero_id if isinstance(hero_id, int) else None,
+        "req_pos": req_pos if isinstance(req_pos, int) else None,
+        "ack_pos": ack_pos if isinstance(ack_pos, int) else None,
+        "req_slot": ((req_cs[0] << 4) | req_cs[1]) if req_cs else None,
+        "ack_slot": ((ack_cs[0] << 4) | ack_cs[1]) if ack_cs else None,
+        "req_skin": req_skin if isinstance(req_skin, int) else None,
+        "battle_skill": battle_skill if isinstance(battle_skill, int) else None,
+    }
+
+
+def parse_ready_select_body(body: bytes, *, outer_slot: int) -> dict[str, object]:
+    """Decode `ev=0x36` (`OperTypeId_Battle_ReadySelect`) binding `uid <-> (camp, seat)`."""
+    out: dict[str, object] = {"ev_type": 0x36, "slot": outer_slot, "body": body}
+    if len(body) >= 3 and body[0] == 0x70:
+        try:
+            fields, _ = parse_mlbb_struct(body, 1, require_terminator=True)
+        except ValueError:
+            return out
+        camp = fields.get(("v", 3))
+        seat = fields.get(("v", 2), 0)
+        if camp in (1, 2) and outer_slot > 0xFF and isinstance(seat, int) and 0 <= seat <= 4:
+            out["uid"] = outer_slot
+            out["camp"] = camp
+            out["seat"] = seat
+            out["slot"] = (camp << 4) | seat
+    return out
 
 
 def parse_chat_body(body: bytes) -> dict[str, object] | None:
@@ -214,7 +293,7 @@ def parse_chat_body(body: bytes) -> dict[str, object] | None:
 
 
 def extract_events_from_struct_list(items: list[object]) -> list[dict[str, object]]:
-    """Extract normalized sub-events (0x06 chat, 0x36/0x0b slot hints) from a `70 51` list."""
+    """Extract normalized sub-events (0x06 chat, 0x36/0x0b slot hints, 0x45 swaps) from a `70 51` list."""
     out: list[dict[str, object]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -230,7 +309,13 @@ def extract_events_from_struct_list(items: list[object]) -> list[dict[str, objec
                 chat["ev_type"] = 0x06
                 chat["slot"] = slot
                 out.append(chat)
-        elif ev_type in (0x36, 0x0B):
+        elif ev_type == 0x45:
+            swap = parse_help_select_body(body, sender_uid=slot)
+            if swap is not None:
+                out.append(swap)
+        elif ev_type == 0x36:
+            out.append(parse_ready_select_body(body, outer_slot=slot))
+        elif ev_type == 0x0B:
             out.append({"ev_type": ev_type, "slot": slot, "body": body})
     return out
 
@@ -241,7 +326,7 @@ def _scan_defensive_subevents(data: bytes) -> list[dict[str, object]]:
     i = 0
     n = len(data)
     while i + 5 <= n:
-        if data[i] == 0x01 and data[i + 1] in (0x06, 0x36, 0x0B) and data[i + 2] == 0x43:
+        if data[i] == 0x01 and data[i + 1] in (0x06, 0x36, 0x0B, 0x45) and data[i + 2] == 0x43:
             ev_type = data[i + 1]
             try:
                 elen, k = read_varint(data, i + 3)
@@ -251,7 +336,7 @@ def _scan_defensive_subevents(data: bytes) -> list[dict[str, object]]:
             if elen > 0 and k + elen <= n and data[k] == 0x70:
                 body = data[k : k + elen]
                 slot: int | None = None
-                # Look backwards locally for enclosing `70 00 <slot_1byte>`.
+                # Look backwards locally for enclosing `70 00 <slot_varint>`.
                 if i >= 3 and data[i - 3 : i - 1] == b"\x70\x00":
                     slot = data[i - 1]
                 elif i >= 4 and data[i - 4 : i - 2] == b"\x70\x00":
@@ -270,6 +355,16 @@ def _scan_defensive_subevents(data: bytes) -> list[dict[str, object]]:
                         out.append(chat)
                         i = k + elen
                         continue
+                elif ev_type == 0x45:
+                    swap = parse_help_select_body(body, sender_uid=slot)
+                    if swap is not None:
+                        out.append(swap)
+                        i = k + elen
+                        continue
+                elif ev_type == 0x36 and slot is not None:
+                    out.append(parse_ready_select_body(body, outer_slot=slot))
+                    i = k + elen
+                    continue
                 else:
                     out.append({"ev_type": ev_type, "slot": slot, "body": body})
                     i = k + elen
