@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import collections
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -50,9 +51,20 @@ def plaintext_records(path):
                         text = raw.decode("utf-8")
                     except UnicodeDecodeError:
                         text = raw.hex()
+                    # The trailing 4a 22 blob is the message id; it embeds the
+                    # sender uid as the second-to-last dash field.
+                    uid = None
+                    blob = body.find(b"\x4a\x22", i + 5 + n, i + 5 + n + 60)
+                    if blob >= 0:
+                        # The id line continues past the fixed 34-byte field:
+                        # ...<msgid>K*<matchid>-<sender uid>-<epoch>
+                        tail = body[blob + 2:blob + 120]
+                        digits = re.findall(rb"-(\d{5,12})-(\d{10,14})", tail)
+                        if digits:
+                            uid = digits[0][0].decode()
                     out.append({
                         "ts": ts, "phase": "draft" if ch in (4, 22) else "battle",
-                        "channel": CHANNELS[ch], "uid": None, "tick": None,
+                        "channel": CHANNELS[ch], "uid": uid, "tick": None,
                         "text": text, "src": "wire-plain",
                     })
                     i += 5 + n
