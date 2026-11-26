@@ -272,6 +272,13 @@ class MatchStore:
             if match_id in self._matches:
                 self._active_match_id = match_id
 
+    def allocate_event_id(self) -> int:
+        """Allocate a strictly monotonic SSE event id without broadcasting."""
+        with self._lock:
+            eid = self._next_event_id
+            self._next_event_id += 1
+            return eid
+
     def publish(self, event_name: str, data: dict[str, Any]) -> int:
         with self._lock:
             eid = self._next_event_id

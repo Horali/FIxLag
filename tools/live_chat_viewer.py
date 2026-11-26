@@ -1,0 +1,15 @@
+"""Thin launcher for the localhost passive MLBB chat viewer (`python tools/live_chat_viewer.py`)."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from tools.chat_viewer.__main__ import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())
