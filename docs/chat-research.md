@@ -128,3 +128,51 @@ Probe run against engine PID 29423 during a live match. `UIBattleChat` scan: 21 
 - `tools/frida/chat_probe.js` is the validated version; it requires the MLBB-RADAR prototype runtime (`runtime.js`, `createDraftRuntime`) from the `frida/prototypes` directory.
 
 **Still open.** Whether a message from the other team ever enters this store. That needs one cooperating human opponent on the enemy side — bots cannot supply it.
+
+---
+
+## 6. Custom draft room, live memory read (2026-11-26)
+
+Match on `154.93.118.110:5007`, custom room, friend on the enemy side, memory probe attached during the match (engine PID 11014).
+
+### 6.1 The channel codes, measured
+
+`m_historyChatList` held 20 records. The `type` field separates the surfaces, and the rendered string carries the channel tag and a per-player colour:
+
+| type | channel | example |
+|---|---|---|
+| 1 | pre-match / hero selection | `[Team]naradira(Fanny): hora hero selection` |
+| 2 | **Team**, in match | `[Team]naradira(Fanny): team hora` |
+| 3 | **All**, in match | `[All]naradira(Fanny): all hora` |
+| 8 | system notice | `Auto-translate is off…` |
+
+Colour prefixes: `[5a96ff]` for the local player's side, `[ff003c]` for the enemy side.
+
+### 6.2 The decisive observation
+
+Records from an enemy-side player appeared with the enemy colour and the all-chat tag:
+
+```
+[ff003c][All]E1dreda.(Suyou): [-]all rex
+[ff003c][All]E1dreda.(Suyou): [-]what
+[ff003c][All]E1dreda.(Suyou): [-]oh
+[ff003c][All]E1dreda.(Suyou): [-]grr
+```
+
+The same player reported sending `team rex` through the **enemy team** channel. **No `[Team]` record from that player exists in the captured history**, and no `team rex` appears in the packet capture either.
+
+### 6.3 Verdict
+
+| claim | status |
+|---|---|
+| Enemy **all-chat** is delivered and readable | **Confirmed** — four records, enemy colour, all-chat tag |
+| Enemy **team-only** chat is delivered and readable | **Not observed** — absent from every record and every capture |
+| Server addresses team chat per side | **Likely** — consistent with the absence, not proven |
+
+**Caveat, stated plainly:** 14 of the 20 records were captured before the match ended and the UI was destroyed; 6 were never read. `team rex` could only be ruled out for the 14 that were seen. The packet capture cannot settle it either way — in this session inbound chat text did **not** appear in plaintext on the wire, while the local player's own outgoing messages did.
+
+### 6.4 Operational notes
+
+- Read the list **during** the match. After the game ends the UI objects are destroyed and a later scan returns 0 instances; the retained history seen earlier (§5) was from a match that had not yet been cleared.
+- The scan needs a large budget: 256 MiB / 6 s returned 0 hits on a live match, while 2 GiB / 20 s returned 22 hits. Coverage, not correctness, is the failure mode.
+- Inbound chat text was not visible in the packet capture for this custom room, so packet capture is not a reliable tool for the enemy-chat question — memory is.

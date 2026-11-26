@@ -110,10 +110,12 @@
         try {
             R.init();
             await R.buildIndex();
-            await dump('UIBattleChat', ['m_ChatList', 'm_historyChatList'], battleEntry);
-            await dump('UIBattleChat', ['m_historyChatList'], historyEntry);
-            await dump('UIChatTeamBattle', ['m_TeamBattleChatList'], msgEntry);
-            await dump('UIChatTeamMatch', ['m_teamMatchList'], msgEntry);
+            const only = config.only || null;
+            const want = name => !only || only.indexOf(name) >= 0;
+            if (want('UIBattleChat')) await dump('UIBattleChat', ['m_ChatList', 'm_historyChatList'], battleEntry);
+            if (want('UIChat')) await dump('UIChat', ['normalList'], msgEntry);
+            if (want('UIChatTeamBattle')) await dump('UIChatTeamBattle', ['m_TeamBattleChatList'], msgEntry);
+            if (want('UIChatTeamMatch')) await dump('UIChatTeamMatch', ['m_teamMatchList'], msgEntry);
             emit('summary', { status: 'complete' });
         } catch (e) {
             emit('probe_error', { error: String(e), stack: e.stack });
