@@ -176,3 +176,49 @@ The same player reported sending `team rex` through the **enemy team** channel. 
 - Read the list **during** the match. After the game ends the UI objects are destroyed and a later scan returns 0 instances; the retained history seen earlier (§5) was from a match that had not yet been cleared.
 - The scan needs a large budget: 256 MiB / 6 s returned 0 hits on a live match, while 2 GiB / 20 s returned 22 hits. Coverage, not correctness, is the failure mode.
 - Inbound chat text was not visible in the packet capture for this custom room, so packet capture is not a reliable tool for the enemy-chat question — memory is.
+
+---
+
+## 7. Anchored reads — no heap scanning (2026-11-26)
+
+Large heap scans on a live game stall it. The fix is anchoring: the full metadata dump (20,035 types, 154,105 fields) exposes static roots that reach the same data with a handful of pointer reads.
+
+### 7.1 The chain that works
+
+```
+SystemData.m_SystemConfigInfo        static field, offset 0x0, type SystemConfig
+SystemConfig._ChatConvertInt         instance offset 0x6d8
+ChatConvertInt.m_mapChatConvertItem  Dictionary<int, ChatConvertItem> at 0x28
+ChatConvertItem                      m_iChatMsgId 0x28, m_iChatInt 0x2c, m_sMsg 0x30
+```
+
+Measured output, three entries:
+
+| key (m_iChatMsgId) | m_iChatInt | m_sMsg |
+|---|---|---|
+| 60177 | 1 | *(empty)* |
+| 60187 | 2 | *(empty)* |
+| 60188 | 3 | *(empty)* |
+
+**Interpretation.** `m_iChatInt` 1/2/3 are the chat channel ids — the same values that appear as `type` in the chat history records (§6.1). `m_sMsg` is empty because the display text is resolved through the localisation table by message id, not stored in this node.
+
+### 7.2 The fast-chat / quick-chat vocabulary
+
+`CData_BattleFastChatMessage` is a `TableStream<int, …, CData_BattleFastChatMessage_Element>` with its own static instance:
+
+```
+CData_BattleFastChatMessage.m_Instance   static offset 0x8, plus GetInstance()
+CData_BattleFastChatMessage_Element      m_ID 0x14, m_mMessage 0x18, m_mMessageSend 0x20,
+                                         m_SendType 0x28, m_Type 0x38, m_IsAllCanSee 0x3c,
+                                         m_BattleAction 0x74, m_SignalButton 0x70
+```
+
+`m_mMessage` / `m_mMessageSend` carry the text, so this table is the quick-chat and draft-suggestion vocabulary (ban suggestions, hero requests) rather than free text.
+
+**Blocker.** The element storage lives in the generic base `TableStreamBase<K,T,E,K,E>`, whose fields resolve to offset `0x0` in the open generic metadata, so the dictionary offset differs per closed instantiation and is not directly usable. Enumerating elements needs the closed generic layout resolved at runtime, or a method call through the engine frame (hook `Camera::GameUpdate` and invoke `GetInstance()`/indexer there — a new thread's call is not acknowledged by the game).
+
+### 7.3 Tooling
+
+- `tools/frida/chatcfg_anchor_probe.js` — the zero-scan read of the conversion table and channel ids.
+- `tools/frida/chat_probe.js` — the chat record read (needs a scan to find the UI instance; keep budgets small and run outside matches).
+- `tools/frida/run_any_probe.py` — generic runner that prints every event, needed because the suite runner filters output.
