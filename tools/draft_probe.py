@@ -504,8 +504,8 @@ def cmd_start(args):
         raise SystemExit("missing %s" % src)
     run(adb_base(serial) + ["push", str(src), "/sdcard/draft_capture.sh"])
     out = root_run(serial,
-                   "nohup sh /sdcard/draft_capture.sh %d %s %d >/dev/null 2>&1 &"
-                   % (args.seconds, args.label, args.snaplen),
+                   "nohup sh /sdcard/draft_capture.sh %d %s %d \"%s\" >/dev/null 2>&1 &"
+                   % (args.seconds, args.label, args.snaplen, args.filter),
                    timeout=30)
     if out.strip():
         print(out)
@@ -663,6 +663,8 @@ def main():
     p.add_argument("--seconds", type=int, default=1500)
     p.add_argument("--snaplen", type=int, default=96,
                    help="96 for flow attribution, 1500 when the payload matters")
+    p.add_argument("--filter", default="udp",
+                   help='tcpdump filter; "udp or tcp" when chat may ride TCP')
     p.set_defaults(func=cmd_start)
 
     p = sub.add_parser("peek", help="pull the running capture and classify it")
