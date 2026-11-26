@@ -25,7 +25,10 @@ def read_varint(buf, i):
 def extract_ticks(pcap_path, match_port):
     """Return (ticks_dict, other_inner_chunks, non_0175_samples)."""
     pkts = list(ce.iter_payloads(pcap_path))
-    in_udp = [(ts, s, sp, d, dp, b) for ts, pr, s, sp, d, dp, b, _ in pkts if pr == "udp" and sp == match_port]
+    # Skip snaplen-truncated packets: a partial frame parses into a bogus tick
+    # and poisons the dictionary for everything after it.
+    in_udp = [(ts, s, sp, d, dp, b) for ts, pr, s, sp, d, dp, b, cut in pkts
+              if pr == "udp" and sp == match_port and not cut]
 
     ticks = {}
     other_inner = []
@@ -39,14 +42,20 @@ def extract_ticks(pcap_path, match_port):
         i = 0
         while i < len(b):
             if b[i:i + 2] == b"\x01\x75" and i + 8 <= len(b):
-                plen = b[i + 6]
+                plen = int.from_bytes(b[i + 6:i + 8], "little")
                 sub = b[i + 8:i + 8 + plen]
                 j = sub.find(b"\x03\x01\x46")
                 if j >= 0:
-                    ln, k = read_varint(sub, j + 3)
+                    try:
+                        ln, k = read_varint(sub, j + 3)
+                    except ValueError:
+                        # Snaplen-truncated frame: abandon this packet, keep the rest.
+                        break
                     inner = sub[k:k + ln]
                     if inner and inner[0] == 0x70:
                         pos = 1
+                        if pos >= len(inner):
+                            continue
                         if inner[pos] == 0x00:
                             seq, pos = read_varint(inner, pos + 1)
                         else:
@@ -85,14 +94,17 @@ def decode_lzw16_ticks(ticks):
         return {}, 0, []
     min_t, max_t = min(ticks), max(ticks)
     missing = [i for i in range(min_t, max_t + 1) if i not in ticks]
-    if min_t != 0 or missing:
+    if min_t != 0:
         return None, 0, missing
+    # Decode as far as the first gap: a missing tick breaks the dictionary chain,
+    # but everything before it is still valid and worth reading.
+    first_gap = min(missing) if missing else max_t + 1
 
     table = {i: bytes([i]) for i in range(256)}
     next_code = 0x0101
     decoded = {}
 
-    for idx in range(max_t + 1):
+    for idx in range(first_gap):
         ts, raw = ticks[idx]
         if len(raw) % 2 != 0:
             raise ValueError(f"odd byte count at tick {idx}: {len(raw)}")
