@@ -780,7 +780,22 @@ Packet counts per direction, both channels, both links:
 
 (Counts double because Network Boost duplicates over both links.)
 
-**What this establishes.** Chat is a plaintext TLV on the existing match UDP socket — tag `0x7002` for the chat container, `0x41 <len> <text>` for the message body. No per-message encryption, no separate channel. The server relays the sender's own message back, and the relayed record carries a message id and several small numeric fields.
+**What this establishes.** Chat is a plaintext TLV on the existing match UDP socket. The **channel is the field id**: `0x7002` for team chat, `0x7003` for all-chat, each holding `0x41 <len> <text>`. No per-message encryption, no separate channel. The server relays the message back, and the relayed record carries a 34-character message id (`20261126112752…`, which embeds the send time) and several small numeric fields.
+
+Confirmed against both of the user's own sends:
+
+```
+out  "team"  ->  70 00 02  41 04 "team"
+out  "all"   ->  70 00 03  41 03 "all"
+```
+
+**Third-party chat does arrive.** During the same match a record appeared that the user did not send:
+
+```
+ts 10:27:52  channel 0x7003 (all)  text "fany ayam mana"
+```
+
+So other players' chat reaches the client in the clear, on the all-chat channel. Whether the sender was a teammate or an enemy cannot be told from the packet alone without the slot mapping, but all-chat is addressed to all ten clients by definition, so an enemy's all-chat is readable.
 
 **What it does not establish.** Whether the server sends **enemy team-only** messages to a client on the other team. Every message observed here was addressed to the sender's own client. Standard implementation is server-side addressing: team chat goes to the five team sockets. If that holds, enemy team chat is never transmitted to the user and cannot be read — the same argument as §6.1, a message not sent cannot be intercepted.
 
