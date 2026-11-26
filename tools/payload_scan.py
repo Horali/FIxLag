@@ -33,14 +33,14 @@ import parse_pcap as pp  # noqa: E402
 
 
 def iter_packets(path):
-    """Yield (ts, src, sport, dst, dport, payload). Stops at a truncated record."""
+    """Yield (ts, src, sport, dst, dport, payload, truncated)."""
     data = Path(path).read_bytes()
     if len(data) < 24:
         return
     endian, _snaplen, linktype = pp.read_global_header(data)
     off = 24
     while off + 16 <= len(data):
-        ts_sec, ts_usec, incl, _orig = struct.unpack(endian + "IIII", data[off:off + 16])
+        ts_sec, ts_usec, incl, orig = struct.unpack(endian + "IIII", data[off:off + 16])
         off += 16
         if off + incl > len(data):
             return
@@ -72,7 +72,7 @@ def iter_packets(path):
         body = l4[8:]
         if ulen >= 8 and len(body) > ulen - 8:
             body = body[:ulen - 8]
-        yield ts, src, sport, dst, dport, body
+        yield ts, src, sport, dst, dport, body, orig > incl
 
 
 def entropy(data):
@@ -86,7 +86,10 @@ def entropy(data):
 def scan(path, needles, show_entropy):
     flows = collections.defaultdict(
         lambda: {"pkts": 0, "bytes": 0, "hits": [], "sample": bytearray()})
-    for ts, src, sport, dst, dport, body in iter_packets(path):
+    truncated = 0
+    for ts, src, sport, dst, dport, body, cut in iter_packets(path):
+        if cut:
+            truncated += 1
         key = (src, sport, dst, dport)
         f = flows[key]
         f["pkts"] += 1
@@ -111,6 +114,12 @@ def scan(path, needles, show_entropy):
 
     hits = [(k, v) for k, v in flows.items() if v["hits"]]
     print("udp flows: %d, with needle hits: %d" % (len(flows), len(hits)))
+    if truncated:
+        total_pkts = sum(f["pkts"] for f in flows.values())
+        print("WARNING %d/%d packets are truncated: the capture was taken at a "
+              "small snaplen." % (truncated, total_pkts))
+        print("        A missing needle may mean 'not captured', not "
+              "'not present'. Rerun with --snaplen 1500.")
     for (src, sport, dst, dport), f in sorted(hits, key=lambda kv: -len(kv[1]["hits"])):
         print("HIT  %s:%d -> %s:%d  %d hit(s)"
               % (src, sport, dst, dport, len(f["hits"])))
