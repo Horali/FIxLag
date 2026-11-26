@@ -254,6 +254,20 @@ def parse_ready_select_body(body: bytes, *, outer_slot: int) -> dict[str, object
     return out
 
 
+def parse_confirm_hero_body(body: bytes, *, outer_slot: int) -> dict[str, object] | None:
+    """Decode `ev=0x34` hero lock-in confirmation payload (`70 00 <hero_id> ... 80`)."""
+    if outer_slot <= 0xFF or len(body) < 3 or body[0] != 0x70:
+        return None
+    try:
+        fields, _ = parse_mlbb_struct(body, 1, require_terminator=True)
+    except ValueError:
+        return None
+    hero_id = fields.get(("v", 0))
+    if not isinstance(hero_id, int) or hero_id <= 0:
+        return None
+    return {"ev_type": 0x34, "uid": outer_slot, "hero_id": hero_id}
+
+
 def parse_chat_body(body: bytes) -> dict[str, object] | None:
     """Decode an ev=0x06 chat sub-event payload (`70 00 <ch> 41 <text> ...`)."""
     if len(body) < 3 or body[0] != 0x70:
@@ -293,7 +307,7 @@ def parse_chat_body(body: bytes) -> dict[str, object] | None:
 
 
 def extract_events_from_struct_list(items: list[object]) -> list[dict[str, object]]:
-    """Extract normalized sub-events (0x06 chat, 0x36/0x0b slot hints, 0x45 swaps) from a `70 51` list."""
+    """Extract normalized sub-events (0x06 chat, 0x34 hero lock-in, 0x36/0x0b slot hints, 0x45 swaps) from a `70 51` list."""
     out: list[dict[str, object]] = []
     for item in items:
         if not isinstance(item, dict):
@@ -309,6 +323,10 @@ def extract_events_from_struct_list(items: list[object]) -> list[dict[str, objec
                 chat["ev_type"] = 0x06
                 chat["slot"] = slot
                 out.append(chat)
+        elif ev_type == 0x34:
+            pick = parse_confirm_hero_body(body, outer_slot=slot)
+            if pick is not None:
+                out.append(pick)
         elif ev_type == 0x45:
             swap = parse_help_select_body(body, sender_uid=slot)
             if swap is not None:

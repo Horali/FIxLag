@@ -94,20 +94,28 @@ class IngestController:
     def _maybe_flush_live(
         self,
         last_flush: float,
-        last_sig: tuple[tuple[str, int, int], ...],
+        last_sig: tuple[Any, ...],
         *,
         force: bool = False,
-    ) -> tuple[float, tuple[tuple[str, int, int], ...]]:
+    ) -> tuple[float, tuple[Any, ...]]:
         if self.on_live_snapshot is None:
             return last_flush, last_sig
         now = time.monotonic()
         if not force and now - last_flush < 5.0:
             return last_flush, last_sig
         matches = self.store.get_matches_snapshot()
-        sig = tuple((str(m.get("match_id")), len(m.get("events") or []), len(m.get("gaps") or [])) for m in matches)
+        sig = tuple(
+            (
+                str(m.get("match_id")),
+                len(m.get("events") or []),
+                len(m.get("gaps") or []),
+                tuple((p.get("uid"), p.get("hero_id")) for p in (m.get("players") or [])),
+            )
+            for m in matches
+        )
         if not sig or sig == last_sig:
             return last_flush, last_sig
-        if any(ev_cnt > 0 or gap_cnt > 0 for _, ev_cnt, gap_cnt in sig):
+        if any(ev_cnt > 0 or gap_cnt > 0 for _, ev_cnt, gap_cnt, _ in sig):
             self.on_live_snapshot(matches)
         return now, sig
 
@@ -202,7 +210,7 @@ class IngestController:
         reader = IncrementalPcapReader()
         mode = "FOLLOW (file)" if follow else "REPLAY (file)"
         last_flush = time.monotonic()
-        last_sig: tuple[tuple[str, int, int], ...] = ()
+        last_sig: tuple[Any, ...] = ()
         try:
             with pcap_path.open("rb") as fh:
                 while not stop_ev.is_set():
@@ -242,7 +250,7 @@ class IngestController:
         tee_fh = None
         first_chunk = True
         last_flush = time.monotonic()
-        last_sig: tuple[tuple[str, int, int], ...] = ()
+        last_sig: tuple[Any, ...] = ()
         try:
             if tee_path is not None:
                 tee_fh = tee_path.open("wb")

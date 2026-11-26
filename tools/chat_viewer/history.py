@@ -15,7 +15,7 @@ from .templates import TemplateResolver
 
 DEFAULT_HISTORY_DIR = Path(__file__).resolve().parents[2] / "data" / "chat_history"
 MIN_PCAP_BYTES = 100
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -186,13 +186,33 @@ class MatchHistoryStore:
                     rec.setdefault("origin", "live")
                     rec.setdefault("source_name", "Live capture")
                     if self.templates.loaded:
+                        hero_by_uid: dict[Any, tuple[int, str]] = {}
+                        for p in rec.get("players") or []:
+                            if not isinstance(p, dict):
+                                continue
+                            hid = p.get("hero_id")
+                            if isinstance(hid, int) and hid > 0:
+                                hname = self.templates.heroes.get(str(hid), "")
+                                p["hero_name"] = hname
+                                if p.get("uid") is not None:
+                                    hero_by_uid[p["uid"]] = (hid, hname)
                         for ev in rec.get("events") or []:
-                            if isinstance(ev, dict) and ev.get("raw_text"):
+                            if not isinstance(ev, dict):
+                                continue
+                            if ev.get("raw_text"):
                                 disp, is_tmpl = self.templates.format_text(
                                     str(ev["raw_text"]), channel=ev.get("channel")
                                 )
                                 ev["display_text"] = disp
                                 ev["is_template"] = is_tmpl
+                            uid_key = ev.get("sender_uid")
+                            ev_hid = ev.get("sender_hero_id")
+                            if isinstance(ev_hid, int) and ev_hid > 0:
+                                ev["sender_hero"] = self.templates.heroes.get(str(ev_hid), "")
+                            elif uid_key in hero_by_uid:
+                                hid, hname = hero_by_uid[uid_key]
+                                ev["sender_hero_id"] = hid
+                                ev["sender_hero"] = hname
                     self._live_games[gid] = rec
 
         cache_raw = _read_json_safe(self._cache_path)
