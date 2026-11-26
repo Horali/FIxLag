@@ -504,8 +504,8 @@ def cmd_start(args):
         raise SystemExit("missing %s" % src)
     run(adb_base(serial) + ["push", str(src), "/sdcard/draft_capture.sh"])
     out = root_run(serial,
-                   "nohup sh /sdcard/draft_capture.sh %d %s >/dev/null 2>&1 &"
-                   % (args.seconds, args.label),
+                   "nohup sh /sdcard/draft_capture.sh %d %s %d >/dev/null 2>&1 &"
+                   % (args.seconds, args.label, args.snaplen),
                    timeout=30)
     if out.strip():
         print(out)
@@ -661,6 +661,8 @@ def main():
     common(p)
     p.add_argument("--label", required=True, help="arm label, e.g. A")
     p.add_argument("--seconds", type=int, default=1500)
+    p.add_argument("--snaplen", type=int, default=96,
+                   help="96 for flow attribution, 1500 when the payload matters")
     p.set_defaults(func=cmd_start)
 
     p = sub.add_parser("peek", help="pull the running capture and classify it")
