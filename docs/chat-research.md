@@ -166,10 +166,10 @@ The same player reported sending `team rex` through the **enemy team** channel. 
 | claim | status |
 |---|---|
 | Enemy **all-chat** is delivered and readable | **Confirmed** — four records, enemy colour, all-chat tag |
-| Enemy **team-only** chat is delivered and readable | **Not observed** — absent from every record and every capture |
-| Server addresses team chat per side | **Likely** — consistent with the absence, not proven |
+| Enemy **team-only** chat is delivered and readable | **NOT observed in the memory store — but see §8: it IS delivered on the wire and dropped by the client** |
+| Server addresses team chat per side | **False** — the server sends it; the client filters it (2026-11-26, §8) |
 
-**Caveat, stated plainly:** 14 of the 20 records were captured before the match ended and the UI was destroyed; 6 were never read. `team rex` could only be ruled out for the 14 that were seen. The packet capture cannot settle it either way — in this session inbound chat text did **not** appear in plaintext on the wire, while the local player's own outgoing messages did.
+**Caveat, stated plainly:** 14 of the 20 records were captured before the match ended and the UI was destroyed; 6 were never read. `team rex` could only be ruled out for the 14 that were seen. The packet capture cannot settle it either way — in this session inbound chat text did **not** appear in plaintext on the wire, while the local player's own outgoing messages did. **That "did not appear in plaintext" was the clue, not a null result: the inbound stream was compressed (§8).**
 
 ### 6.4 Operational notes
 
@@ -236,3 +236,47 @@ Completeness test: compare the `m_dic` count with `dataRowNum` (the header row t
 - `tools/frida/chat_probe.js` — the chat record read (needs a scan to find the UI instance; keep budgets small and run outside matches).
 - `tools/frida/fastchat_table_probe.js` — the zero-scan read of the quick-chat table; prints the resolved base layout and every row.
 - `tools/frida/run_any_probe.py` — generic runner that prints every event, needed because the suite runner filters output.
+
+---
+
+## 8. Corrected verdict: the server sends enemy team chat, the client drops it (2026-11-26)
+
+The earlier conclusion in §6.3 — "not observed, likely not delivered" — was wrong. The message was on the wire the whole time; the inbound stream is **compressed**, so plaintext searches could not see it.
+
+### 8.1 The transport detail that hid it
+
+Inbound match-UDP ticks are framed `03 01 46 <seq> …` and carry a compression tag. Two variants were observed:
+
+| capture | match endpoint | inbound tag | payload |
+|---|---|---|---|
+| `draft_CHAT3.pcap` | `:5003` | `0x52` | raw bytes — chat visible as plaintext |
+| `draft_CHAT4.pcap` | `:5007` | `0x42` | **LZW-16**, session-persistent dictionary |
+
+That is why the same experiment produced readable text in one match and nothing in the next: it was never about the channel, it was about compression.
+
+### 8.2 Decoded evidence
+
+`tools/decode_lzw_chat.py` decodes the `0x42` stream. On `draft_CHAT4.pcap`: **1,697 ticks, zero dictionary errors, 13 chat events.**
+
+| tick | time | sender uid tail | channel | text | in history store |
+|---|---|---|---|---|---|
+| 141 | 13:10:06 | 30028189 (self) | 2 Team | `team hora` | id 1 |
+| 244 | 13:10:13 | 30028189 | 3 All | `all hora` | id 2 |
+| 458 | 13:10:27 | 539123711 (enemy) | 3 All | `all rex` | id 5 |
+| **578** | **13:10:35** | **539123711 (enemy)** | **2 Team** | **`team rex`** | **id 6 — skipped** |
+| 663 | 13:10:40 | 30028189 | 3 All | `okok` | id 7 |
+
+The enemy's team-channel message is **in the inbound stream addressed to this client**. The memory store's id sequence runs `…4, 5, 7, 8…` — the counter advanced for id 6 and no record was retained. That is client-side filtering, mechanism **(c)**, confirmed twice independently.
+
+`draft_DRAFT.pcap` agrees: player `68140340`'s `ch=2` messages `Hi` and `Team Hora` were delivered over UDP in the same way.
+
+### 8.3 Consequences
+
+- **Enemy team chat is readable** — from the wire, after decompression. Not from the client's chat store, which deliberately drops it.
+- **`campType` in `BattleChatInfo` is not the discriminator** it looked like: the record never reaches that list.
+- The id gap in `m_historyChatList` is the client-side signature of a filtered message, and is the cheapest way to detect that filtering happened without capturing at all.
+- To read it: capture full payloads from before the match connection opens (the LZW dictionary is session-persistent, so a mid-match start cannot decode from tick 0), then run `python tools/decode_lzw_chat.py`.
+
+### 8.4 What remains true from the earlier sections
+
+The plaintext reads in §5–§6 were genuine for the uncompressed match (`0x52`). The anchored reads in §7 are still the right way to read the client store, and they are what exposed the id gap. The only correction is the conclusion drawn from the absence of text: absence in plaintext did not mean absence on the wire.
