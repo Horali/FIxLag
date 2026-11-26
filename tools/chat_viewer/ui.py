@@ -190,6 +190,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .player-chip.you { background: var(--cyan-bg); border-color: rgba(34,211,238,0.5); color: #cffafe; font-weight: 700; }
   .player-chip.enemy { background: var(--red-bg); border: 1px solid rgba(239,68,68,0.35); color: #fee2e2; }
 
+  .chip-hero { color: #fde68a; font-weight: 600; opacity: 0.95; }
+
   .filters-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .filter-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
 
@@ -231,6 +233,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .chat-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .chat-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
   .sender-name { font-weight: 700; font-size: 13.5px; color: var(--text); }
+  .hero-tag {
+    font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px;
+    background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245, 158, 11, 0.32);
+    color: #fde68a;
+  }
   .side-tag {
     font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
     background: rgba(255,255,255,0.07); color: var(--muted);
@@ -758,6 +765,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
     return raw;
   }
 
+  function heroForEvent(ev, heroByUid) {
+    if (ev.sender_hero) return ev.sender_hero;
+    if (ev.sender_uid && heroByUid && heroByUid.has(ev.sender_uid)) return heroByUid.get(ev.sender_uid);
+    return "";
+  }
+
   function sideBadgeLabel(side) {
     if (side === "SELF") return "You";
     if (side === "ALLY") return "Ally";
@@ -814,9 +827,27 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     // Roster chips
     const players = game.players || [];
+    const heroByUid = new Map();
+    for (const p of players) {
+      if (p.uid && p.hero_name) heroByUid.set(p.uid, p.hero_name);
+    }
     const localCamp = game.local_camp || 1;
     const allies = players.filter((p) => p.camp === localCamp);
     const enemies = players.filter((p) => p.camp && p.camp !== localCamp);
+    const appendPlayerChip = (grp, p, isEnemy) => {
+      const isYou = !isEnemy && Boolean(game.local_uid && p.uid === game.local_uid);
+      const chip = document.createElement("span");
+      chip.className = "player-chip" + (isYou ? " you" : isEnemy ? " enemy" : "");
+      const label = isYou ? `${p.name || p.uid} (You)` : (p.name || `uid:${p.uid}`);
+      chip.appendChild(document.createTextNode(label));
+      if (p.hero_name) {
+        const hs = document.createElement("span");
+        hs.className = "chip-hero";
+        hs.textContent = ` · ${p.hero_name}`;
+        chip.appendChild(hs);
+      }
+      grp.appendChild(chip);
+    };
     if (allies.length || enemies.length) {
       el.rosterBar.style.display = "flex";
       el.rosterBar.innerHTML = "";
@@ -824,25 +855,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
         const grp = document.createElement("div");
         grp.className = "team-group";
         grp.innerHTML = `<span class="team-lbl ally">Your Team</span>`;
-        for (const p of allies) {
-          const chip = document.createElement("span");
-          const isYou = game.local_uid && p.uid === game.local_uid;
-          chip.className = "player-chip" + (isYou ? " you" : "");
-          chip.textContent = isYou ? `${p.name || p.uid} (You)` : (p.name || `uid:${p.uid}`);
-          grp.appendChild(chip);
-        }
+        for (const p of allies) appendPlayerChip(grp, p, false);
         el.rosterBar.appendChild(grp);
       }
       if (enemies.length) {
         const grp = document.createElement("div");
         grp.className = "team-group";
         grp.innerHTML = `<span class="team-lbl enemy">Enemy Team</span>`;
-        for (const p of enemies) {
-          const chip = document.createElement("span");
-          chip.className = "player-chip enemy";
-          chip.textContent = p.name || `uid:${p.uid}`;
-          grp.appendChild(chip);
-        }
+        for (const p of enemies) appendPlayerChip(grp, p, true);
         el.rosterBar.appendChild(grp);
       }
     } else {
@@ -864,7 +884,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       else if (state.sideFilter === "ENEMY" && ev.side !== "ENEMY") return false;
       else if (state.sideFilter === "ENEMY_TEAM" && !(ev.side === "ENEMY" && (ev.channel === 2 || ev.channel === 4))) return false;
       if (q) {
-        const hay = `${friendlySender(ev)} ${ev.display_text} ${ev.raw_text}`.toLowerCase();
+        const hay = `${friendlySender(ev)} ${heroForEvent(ev, heroByUid)} ${ev.display_text} ${ev.raw_text}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -939,6 +959,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if (ev.tick !== null && ev.tick !== undefined) tm.title = `Tick #${ev.tick}`;
 
       meta.appendChild(nm);
+      const heroName = heroForEvent(ev, heroByUid);
+      if (heroName) {
+        const hr = document.createElement("span");
+        hr.className = "hero-tag";
+        hr.textContent = heroName;
+        if (ev.sender_hero_id) hr.title = `hero_id: ${ev.sender_hero_id}`;
+        meta.appendChild(hr);
+      }
       meta.appendChild(st);
       meta.appendChild(ch);
       meta.appendChild(tm);
