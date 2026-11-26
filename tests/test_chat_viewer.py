@@ -669,16 +669,24 @@ def test_10_past_games_history_cache_and_api(tmp_path: Path) -> None:
         assert client.get("/api/history/pcap:missing.pcap:m1").status_code == 404
         assert client.delete("/api/history/pcap:draft_CHAT4.pcap:m1").status_code == 400
 
-        # Following a capture saves it as a live game upon stop and shows it in /api/history.
+        # Following an external capture (simulating tee=False live capture) saves a live game upon stop and allows deletion.
+        external_live = tmp_path / "external_live.pcap"
+        shutil.copyfile(CAPTURES_DIR / "draft_DRAFT.pcap", external_live)
+        ext_store, _, _ = _decode_pcap_whole(external_live)
+        ext_matches = ext_store.get_matches()
+        assert ext_matches and ext_matches[0].battle_id
+        expected_live_events = len(ext_matches[0].events)
+        expected_live_gid = f"live:{ext_matches[0].battle_id}"
+
         r_follow = client.post(
             "/api/source",
-            json={"mode": "pcap", "path": str(caps_dir / "draft_CHAT4.pcap"), "follow": True},
+            json={"mode": "pcap", "path": str(external_live), "follow": True},
         )
         assert r_follow.status_code == 200
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             ms = client.get("/api/matches").json()["matches"]
-            if ms and len(ms[0]["events"]) == 33:
+            if ms and len(ms[0]["events"]) == expected_live_events:
                 break
             time.sleep(0.05)
 
@@ -689,7 +697,7 @@ def test_10_past_games_history_cache_and_api(tmp_path: Path) -> None:
         live_games = [g for g in client.get("/api/history").json()["games"] if g["origin"] == "live"]
         assert len(live_games) == 1
         live_gid = live_games[0]["game_id"]
-        assert live_gid == "live:231398567527828650"
+        assert live_gid == expected_live_gid
 
         assert client.delete(f"/api/history/{live_gid}").status_code == 200
         assert client.delete(f"/api/history/{live_gid}").status_code == 404
@@ -1201,5 +1209,202 @@ def test_14_hero_pick_tracking_live_swap_and_1203(tmp_path: Path) -> None:
         assert ".hero-tag" in r_home.text
         assert ".chip-hero" in r_home.text
         assert "heroForEvent" in r_home.text
+
+
+def test_15_history_dedup_and_dynamic_live_updates(tmp_path: Path) -> None:
+    from tools.chat_viewer.history import MatchHistoryStore, _dedup_records
+
+    caps_dir = tmp_path / "caps"
+    hist_dir = tmp_path / "hist"
+    caps_dir.mkdir()
+    hist_dir.mkdir()
+
+    shutil.copyfile(CAPTURES_DIR / "draft_CHAT4.pcap", caps_dir / "draft_CHAT4.pcap")
+    real_tmpl = REPO_ROOT / "data" / "chat_templates.json"
+    tmpl_arg = real_tmpl if real_tmpl.is_file() else (tmp_path / "__missing__.json")
+    live_cap = CAPTURES_DIR / "live_20261126_234439.pcap"
+    if live_cap.is_file():
+        shutil.copyfile(live_cap, caps_dir / "live_20261126_234439.pcap")
+
+    # Seed stale hero-less live_games.json entries sharing the same battle_ids as the PCAPs.
+    base_chat4 = _decode_pcap_whole(CAPTURES_DIR / "draft_CHAT4.pcap", templates_path=tmpl_arg)[0].get_matches_snapshot()[0]
+    stale_chat4 = dict(base_chat4)
+    stale_chat4["game_id"] = "live:231398567527828650"
+    stale_chat4["origin"] = "live"
+    stale_chat4["source_name"] = "Live capture"
+    seeded_live: dict[str, dict] = {"live:231398567527828650": stale_chat4}
+
+    if live_cap.is_file():
+        base_live = _decode_pcap_whole(live_cap, templates_path=tmpl_arg)[0].get_matches_snapshot()[0]
+        stale_live = dict(base_live)
+        stale_live["game_id"] = f"live:{base_live['battle_id']}"
+        stale_live["origin"] = "live"
+        stale_live["source_name"] = "Live capture"
+        stale_live["players"] = [
+            {k: v for k, v in p.items() if k not in ("hero_id", "hero_name")}
+            for p in base_live["players"]
+        ]
+        stale_live["events"] = [
+            {k: v for k, v in ev.items() if k not in ("sender_hero_id", "sender_hero")}
+            for ev in base_live["events"]
+        ]
+        seeded_live[stale_live["game_id"]] = stale_live
+
+    (hist_dir / "live_games.json").write_text(
+        json.dumps({"version": 1, "games": seeded_live}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    app = create_app(
+        captures_dir=caps_dir,
+        templates_path=tmpl_arg,
+        history_dir=hist_dir,
+        auto_scan_history=True,
+    )
+    with TestClient(app) as client:
+        expected_total = 2 if live_cap.is_file() else 1
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            r_h = client.get("/api/history")
+            if not r_h.json()["scan"]["scanning"] and r_h.json()["total_with_chat"] >= expected_total:
+                break
+            time.sleep(0.05)
+
+        games = client.get("/api/history").json()["games"]
+        assert len(games) == expected_total
+        bids = [g["battle_id"] for g in games if g.get("battle_id")]
+        assert len(bids) == len(set(bids))
+        assert any(g["game_id"] == "pcap:draft_CHAT4.pcap:m1" for g in games)
+        assert not any(g["game_id"] == "live:231398567527828650" for g in games)
+
+        if live_cap.is_file():
+            win_gid = "pcap:live_20261126_234439.pcap:m1"
+            assert any(g["game_id"] == win_gid for g in games)
+            assert not any(g["game_id"] == "live:802901785110406092" for g in games)
+            full = client.get(f"/api/history/{win_gid}").json()
+            assert sum(1 for p in full["players"] if p.get("hero_name")) == 10
+
+        # UI contains dynamic hero precedence, scroll preservation, and history_updated handlers.
+        html = client.get("/").text
+        assert "history_updated" in html
+        assert "loadedHistoryGames.clear" in html
+        assert "prevScrollTop" in html
+        hero_fn = html.split("function heroForEvent", 1)[1].split("}", 1)[0]
+        assert hero_fn.index("heroByUid.has(ev.sender_uid)") < hero_fn.index("ev.sender_hero")
+
+        # Deleted PCAP gets pruned from Past Games on rescan.
+        (caps_dir / "draft_CHAT4.pcap").unlink()
+        app.state.history.start_background_scan(force=False)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            r_after = client.get("/api/history?include_empty=1")
+            if not r_after.json()["scan"]["scanning"]:
+                break
+            time.sleep(0.05)
+        assert all(g["game_id"] != "pcap:draft_CHAT4.pcap:m1" for g in r_after.json()["games"])
+
+    # Fallback deduplication without battle_id: matches within 5s on same endpoint, keeps 35s-apart matches separate.
+    no_bid_records = [
+        {
+            "game_id": "live:1000:1.2.3.4:5002",
+            "origin": "live",
+            "source_name": "Live capture",
+            "battle_id": None,
+            "server_ip": "1.2.3.4",
+            "server_port": 5002,
+            "first_ts": 1000.0,
+            "last_ts": 1010.0,
+            "players": [],
+            "events": [{"seq_id": 1, "raw_text": "hi", "display_text": "hi", "is_template": False}],
+            "gaps": [],
+        },
+        {
+            "game_id": "pcap:match_a.pcap:m1",
+            "origin": "pcap",
+            "source_name": "match_a.pcap",
+            "battle_id": None,
+            "server_ip": "1.2.3.4",
+            "server_port": 5002,
+            "first_ts": 1003.0,
+            "last_ts": 1010.0,
+            "players": [],
+            "events": [{"seq_id": 1, "raw_text": "hi", "display_text": "hi", "is_template": False}],
+            "gaps": [],
+        },
+        {
+            "game_id": "live:1038:1.2.3.4:5002",
+            "origin": "live",
+            "source_name": "Live capture",
+            "battle_id": None,
+            "server_ip": "1.2.3.4",
+            "server_port": 5002,
+            "first_ts": 1038.0,
+            "last_ts": 1050.0,
+            "players": [],
+            "events": [{"seq_id": 1, "raw_text": "next", "display_text": "next", "is_template": False}],
+            "gaps": [],
+        },
+    ]
+    deduped = _dedup_records(no_bid_records)
+    assert [r["game_id"] for r in deduped] == ["pcap:match_a.pcap:m1", "live:1038:1.2.3.4:5002"]
+
+    # Richer live wins while PCAP is stale; index_pcap_file upgrades it and publishes history_updated SSE.
+    cap_up_dir = tmp_path / "up_caps"
+    hist_up_dir = tmp_path / "up_hist"
+    cap_up_dir.mkdir()
+    tee_file = cap_up_dir / "live_tee.pcap"
+    raw_chat4 = (CAPTURES_DIR / "draft_CHAT4.pcap").read_bytes()
+    tee_file.write_bytes(raw_chat4[: len(raw_chat4) // 2])
+
+    sse_store = MatchStore()
+    up_hist = MatchHistoryStore(
+        captures_dir=cap_up_dir,
+        history_dir=hist_up_dir,
+        templates=TemplateResolver(tmpl_arg),
+        on_change=lambda: sse_store.publish("history_updated", {"ts": time.time()}),
+    )
+    assert up_hist.index_pcap_file(tee_file) is True
+    stale_pcap_events = len(up_hist.get_game("pcap:live_tee.pcap:m1")["events"])
+    assert stale_pcap_events < 33
+
+    rich_live = dict(base_chat4)
+    rich_live["players"] = [dict(p, hero_id=17, hero_name="Fanny") for p in base_chat4["players"]]
+    up_hist.save_live_matches([rich_live])
+    listed_before = up_hist.list_games(include_empty=False)["games"]
+    assert len(listed_before) == 1
+    assert listed_before[0]["game_id"] == "live:231398567527828650"
+
+    # Now finish writing full PCAP + add hero to verify index_pcap_file supersedes live and emits SSE.
+    tee_file.write_bytes(raw_chat4)
+    rich_live_no_hero = dict(base_chat4)
+    up_hist.save_live_matches([rich_live_no_hero])
+    assert up_hist.index_pcap_file(tee_file) is True
+    listed_after = up_hist.list_games(include_empty=False)["games"]
+    assert len(listed_after) == 1
+    assert listed_after[0]["game_id"] == "pcap:live_tee.pcap:m1"
+    assert any(ev_name == "history_updated" for _, ev_name, _ in sse_store._replay_log)
+    assert up_hist.index_pcap_file(tmp_path / "outside.pcap") is False
+
+    # Incremental SSE check on live_20261126_234439.pcap: chat before pick gets empty hero, then match_update backfills!
+    if live_cap.is_file():
+        live_sse_store = MatchStore()
+        live_router = SessionRouter(store=live_sse_store, templates=TemplateResolver(tmpl_arg))
+        rdr = IncrementalPcapReader()
+        for pkt in rdr.feed(live_cap.read_bytes()):
+            live_router.on_packet(pkt)
+        events_seq = [(ev_name, data) for _, ev_name, data in live_sse_store._replay_log]
+        chat_pre = next(
+            d for name, d in events_seq if name == "chat" and d.get("sender_name") == "mashasha" and d.get("raw_text") == "2/9"
+        )
+        assert chat_pre["sender_hero"] == ""
+        backfills = [
+            d
+            for name, d in events_seq
+            if name == "match_update"
+            and "events" in d
+            and any(e.get("sender_name") == "mashasha" and e.get("sender_hero") == "Argus" for e in d["events"])
+        ]
+        assert backfills
+
 
 
