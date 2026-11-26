@@ -383,7 +383,10 @@ def test_8_chunked_partial_read_fuzz_and_linktypes() -> None:
         whole_store, _, whole_rdr = _decode_pcap_whole(CAPTURES_DIR / fname)
 
         chunk_store = MatchStore()
-        chunk_router = SessionRouter(store=chunk_store)
+        chunk_router = SessionRouter(
+            store=chunk_store,
+            templates=TemplateResolver(REPO_ROOT / "data" / "__missing__.json"),
+        )
         chunk_rdr = IncrementalPcapReader()
         off = 0
         while off < len(data):
@@ -691,4 +694,274 @@ def test_10_past_games_history_cache_and_api(tmp_path: Path) -> None:
         assert client.delete(f"/api/history/{live_gid}").status_code == 200
         assert client.delete(f"/api/history/{live_gid}").status_code == 404
         assert all(g["game_id"] != live_gid for g in client.get("/api/history").json()["games"])
+
+
+def test_11_draft_live6_ev45_swap_and_attribution() -> None:
+    store, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_LIVE6.pcap")
+    matches = store.get_matches()
+    assert len(matches) == 2
+
+    m1, m2 = matches
+    # Match 1 (ep 5507): uid=338471731 (d., pos 9 -> 0x23) swaps with uid=389466225 (Rambutan., pos 7 -> 0x21).
+    assert m1.battle_id == "704578279919062684"
+    assert m1.attribution_frozen is True
+    assert m1.frozen_at_tick == 0
+    assert m1.anomalies == []
+    assert len(m1.swap_history) == 1
+    assert m1.slot_to_uid[0x21] == 338471731
+    assert m1.slot_to_uid[0x23] == 389466225
+    assert m1.players_by_uid[338471731].slot == 0x21
+    assert m1.players_by_uid[389466225].slot == 0x23
+
+    m1_checks = [(ev.phase, ev.slot, ev.raw_text, ev.sender_uid, ev.sender_name) for ev in m1.events]
+    assert ("draft", 0x23, "5/6/133", 338471731, "d.") in m1_checks
+    assert ("draft", 0x23, "5/6/122", 338471731, "d.") in m1_checks
+    assert ("draft", 0x21, "7/31471/9", 338471731, "d.") in m1_checks
+    assert ("draft", 0x23, "1/Last game", 389466225, "Rambutan.") in m1_checks
+
+    # Match 2 (ep 5503): uid=88409820 (ame., pos 4 -> 0x13) swaps with uid=1382063784 (ʀʌᴠɪᴏʟɪ, pos 3 -> 0x12).
+    assert m2.battle_id == "705721359695090677"
+    assert m2.attribution_frozen is True
+    assert m2.anomalies == []
+    assert len(m2.swap_history) == 1
+    assert m2.slot_to_uid[0x12] == 88409820
+    assert m2.slot_to_uid[0x13] == 1382063784
+    assert m2.players_by_uid[88409820].slot == 0x12
+    assert m2.players_by_uid[1382063784].slot == 0x13
+
+    m2_checks = [(ev.phase, ev.slot, ev.raw_text, ev.sender_uid, ev.sender_name) for ev in m2.events]
+    assert ("draft", 0x12, "1/I was changing song", 1382063784, "ʀʌᴠɪᴏʟɪ") in m2_checks
+    assert ("draft", 0x12, "5/6/131", 1382063784, "ʀʌᴠɪᴏʟɪ") in m2_checks
+    assert ("draft", 0x13, "5/6/129", 88409820, "ame.") in m2_checks
+    assert ("draft", 0x12, "7/31471/4", 88409820, "ame.") in m2_checks
+    assert ("draft", 0x13, "1/huh I picked jul what", 1382063784, "ʀʌᴠɪᴏʟɪ") in m2_checks
+    assert ("battle", 0x13, "kal long u", 1382063784, "ʀʌᴠɪᴏʟɪ") in m2_checks
+
+
+def test_12_ev45_edge_cases_freeze_mismatch_and_kcp_fragment_guard() -> None:
+    def make_kcp_seg(conv: bytes, sn: int, body: bytes, frg: int = 0) -> bytes:
+        return b"\x01\x51" + conv + struct.pack("<IIIHBBH", 0, 1, sn, 64, frg, 0, len(body)) + body
+
+    def make_1202(players: list[tuple[int, int, int, str]]) -> bytes:
+        items = []
+        for uid, camp, seat, name in sorted(players, key=lambda x: x[0]):  # UID-sorted, not seat-sorted!
+            nb = name.encode("utf-8")
+            items.append(
+                b"\x70\x00"
+                + _encode_varint(uid)
+                + b"\x01"
+                + _encode_varint(camp)
+                + b"\x02"
+                + _encode_varint(seat)
+                + b"\x43"
+                + _encode_varint(len(nb))
+                + nb
+                + b"\x80"
+            )
+        return b"\x70\x00\xb2\x09\x70\x50" + _encode_varint(len(items)) + b"".join(items) + b"\x80"
+
+    def make_1101(sub_items: list[bytes], phase_byte: int = 0x02) -> bytes:
+        inner = b"\x70\x51" + _encode_varint(len(sub_items)) + b"".join(sub_items) + b"\x80"
+        return b"\x70\x00\xcd\x08\x03" + bytes([phase_byte]) + b"\x46" + _encode_varint(len(inner)) + inner + b"\x80"
+
+    def make_ev45_item(req_uid: int, hero_id: int, req_pos: int, ack_uid: int, ack_pos: int) -> bytes:
+        body = (
+            b"\x70\x00"
+            + _encode_varint(req_uid)
+            + b"\x01"
+            + _encode_varint(hero_id)
+            + b"\x02"
+            + _encode_varint(req_pos)
+            + b"\x03"
+            + _encode_varint(ack_uid)
+            + b"\x04"
+            + _encode_varint(ack_pos)
+            + b"\x80"
+        )
+        return b"\x70\x00" + _encode_varint(ack_uid) + b"\x01\x45\x43" + _encode_varint(len(body)) + body + b"\x80"
+
+    def make_ev06_item(slot: int, ch: int, text: str, msg_uid: str = "") -> bytes:
+        tb = text.encode("utf-8")
+        cb = b"\x70\x00" + _encode_varint(ch) + b"\x41" + _encode_varint(len(tb)) + tb
+        if msg_uid:
+            mb = msg_uid.encode("utf-8")
+            cb += b"\x4b" + _encode_varint(len(mb)) + mb
+        cb += b"\x80"
+        return b"\x70\x00" + _encode_varint(slot) + b"\x01\x06\x43" + _encode_varint(len(cb)) + cb + b"\x80"
+
+    def feed_pkt(router: SessionRouter, ts: float, payload: bytes) -> None:
+        raw = _pcap_header(LINKTYPE_RAW) + _pcap_record(
+            int(ts), 0, _build_udp_ipv4_packet("2.2.2.2", 5507, "10.0.0.1", 40000, payload)
+        )
+        rdr = IncrementalPcapReader()
+        for pkt in rdr.feed(raw):
+            router.on_packet(pkt)
+
+    store = MatchStore()
+    router = SessionRouter(store=store, templates=TemplateResolver(REPO_ROOT / "data" / "__missing__.json"))
+    conv = b"\xaa\xbb\xcc\x01"
+
+    # 1) Send UID-sorted mid=1202 (uid=200 at camp=2,seat=3; uid=300 at camp=2,seat=1).
+    feed_pkt(
+        router,
+        10.0,
+        make_kcp_seg(conv, 0, make_1202([(300, 2, 1, "Alice"), (200, 2, 3, "Bob"), (100, 1, 0, "Self")])),
+    )
+    sess = store.get_matches()[0]
+    assert sess.slot_to_uid[0x21] == 300
+    assert sess.slot_to_uid[0x23] == 200
+
+    # 2) Fragmented KCP ev=0x45 guard: sn=2 (frg=1) then sn=3 (frg=0) with sn=1 missing must NOT apply swap.
+    swap_1101 = make_1101([make_ev45_item(req_uid=200, hero_id=122, req_pos=9, ack_uid=300, ack_pos=7)])
+    mid = len(swap_1101) // 2
+    feed_pkt(router, 11.0, make_kcp_seg(conv, 2, swap_1101[:mid], frg=1))
+    assert sess.slot_to_uid[0x21] == 300
+    assert sess.slot_to_uid[0x23] == 200
+    feed_pkt(router, 12.0, make_kcp_seg(conv, 3, swap_1101[mid:], frg=0))
+    assert sess.slot_to_uid[0x21] == 300
+    assert sess.slot_to_uid[0x23] == 200
+    assert sess.swap_history == []
+
+    # Truncated cd 08 packet must also be ignored safely.
+    feed_pkt(router, 12.5, make_kcp_seg(conv, 4, swap_1101[:-3], frg=0))
+    assert sess.slot_to_uid[0x21] == 300
+    assert sess.swap_history == []
+
+    # Once sn=1 (frg=0) arrives to establish the leading fragment boundary, sn=2..3 drains and swaps!
+    noop_1101 = make_1101([])
+    feed_pkt(router, 13.0, make_kcp_seg(conv, 1, noop_1101, frg=0))
+    assert sess.slot_to_uid[0x21] == 200
+    assert sess.slot_to_uid[0x23] == 300
+    assert len(sess.swap_history) == 1
+
+    # Duplicate ev=0x45 in a distinct KCP packet is idempotent (does not undo or duplicate swap).
+    feed_pkt(router, 14.0, make_kcp_seg(conv, 5, make_1101([make_ev45_item(200, 122, 9, 300, 7)]), frg=0))
+    assert sess.slot_to_uid[0x21] == 200
+    assert sess.slot_to_uid[0x23] == 300
+    assert len(sess.swap_history) == 1
+
+    # 3) Pre-freeze self-correcting ev=0x06 check overrides slot_to_uid and logs mismatch anomaly.
+    feed_pkt(
+        router,
+        15.0,
+        make_kcp_seg(conv, 6, make_1101([make_ev06_item(0x21, 4, "1/override", "555-300-1")]), frg=0),
+    )
+    assert sess.slot_to_uid[0x21] == 300
+    assert any(a["kind"] == "slot_uid_mismatch" and a["expected_uid"] == 200 and a["actual_uid"] == 300 for a in sess.anomalies)
+    feed_pkt(router, 16.0, make_kcp_seg(conv, 7, make_1101([make_ev06_item(0x21, 4, "5/6/122")]), frg=0))
+    assert sess.events[-1].sender_uid == 300
+
+    # 4) Freeze at battle start (tick 0): swaps and mismatches after tick 0 must NOT alter roster!
+    enc_table: dict[bytes, int] = {bytes([i]): i for i in range(256)}
+    enc_next = 0x0101
+
+    def enc_tick(raw_data: bytes) -> bytes:
+        nonlocal enc_next
+        codes: list[int] = []
+        cur = b""
+        for b in raw_data:
+            nxt = cur + bytes([b])
+            if nxt in enc_table:
+                cur = nxt
+            else:
+                codes.append(enc_table[cur])
+                if enc_next < 0x4000:
+                    enc_table[nxt] = enc_next
+                    enc_next += 1
+                cur = bytes([b])
+        if cur:
+            codes.append(table_get := enc_table[cur])
+            _ = table_get
+        return b"".join(c.to_bytes(2, "big") for c in codes)
+
+    feed_pkt(router, 20.0, _make_030146_lzw_packet(conv, 0, enc_tick(b"\x70\x80")))
+    assert sess.attribution_frozen is True
+    assert sess.frozen_at_tick == 0
+
+    # Post-freeze ev=0x45 in battle tick must record post_freeze_swap anomaly and leave 0x21 -> 300 untouched.
+    post_swap_tick = b"\x70\x51\x01" + make_ev45_item(300, 122, 7, 200, 9) + b"\x80"
+    feed_pkt(router, 21.0, _make_030146_lzw_packet(conv, 1, enc_tick(post_swap_tick)))
+    assert sess.slot_to_uid[0x21] == 300
+    assert any(a["kind"] == "post_freeze_swap" and a["tick"] == 1 for a in sess.anomalies)
+
+    # Post-freeze ev=0x06 mismatch records anomaly, tags that ChatEvent with msg_uid, and keeps roster frozen.
+    post_chat_tick = b"\x70\x51\x01" + make_ev06_item(0x21, 2, "hi", "555-200-99") + b"\x80"
+    feed_pkt(router, 22.0, _make_030146_lzw_packet(conv, 2, enc_tick(post_chat_tick)))
+    assert sess.slot_to_uid[0x21] == 300
+    assert sess.events[-1].sender_uid == 200
+    assert any(a["kind"] == "slot_uid_mismatch" and a["frozen"] is True and a["tick"] == 2 for a in sess.anomalies)
+
+
+def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
+    sample_file = tmp_path / "chat_templates.json"
+    sample_file.write_text(
+        json.dumps(
+            {
+                "messages": {
+                    "2/2": "[Emoji] Love",
+                    "2/3": "[Emoji] Cry",
+                    "5/3": "I'm {0} and I want to use {1}.",
+                    "5/3_notitle": "I want to use {2}. My current Hero Power is {1}.",
+                    "5/5": "I want to use {hero}. {1}, {2}",
+                    "5/6": "I want to use {hero}.",
+                    "5/7": "Got MVP using {0} in the last match, with a score of {1}/{2}/{3}.",
+                    "7/31471": "Thank you! Victory is ours! @{0}",
+                    "7/31684": "A balanced lineup! We got this!",
+                    "7/154830": "Thanks, well done! @{0}",
+                    "8/48273": "Which hero should we ban?",
+                    "12/40200": "[Emote] Genius!",
+                    "12/40677": "[Emote] Hahaha!",
+                    "12/40724": "[Emote] realmeow M7",
+                },
+                "heroes": {
+                    "17": {"name": "Fanny", "role": "Assassin"},
+                    "88": {"name": "Masha", "role": "Fighter/Tank"},
+                    "114": {"name": "Melissa", "role": "Marksman"},
+                    "126": {"name": "Suyou", "role": "Assassin/Fighter"},
+                    "133": {"name": "Hirara", "role": "Assassin"},
+                },
+                "strings": {
+                    "11010": "Ban {hero} ({role})",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    tr = TemplateResolver(sample_file)
+    assert tr.format_text("3/11010/88") == ("Ban Masha (Fighter/Tank)", True)
+    assert tr.format_text("5/6/133") == ("I want to use Hirara.", True)
+    assert tr.format_text("5/5/3842/5265/17") == ("I want to use Fanny. Matches: 5265, Win Rate: 73.0%", True)
+    assert tr.format_text("5/7/4/22/1/5/133") == (
+        "Got MVP using Hirara in the last match, with a score of 22/1/5.",
+        True,
+    )
+    assert tr.format_text("5/3/Global No.64 Suyou/10557/206/126|4/5/126") == (
+        "I'm Global No.64 Suyou and I want to use Suyou.",
+        True,
+    )
+    assert tr.format_text("5/3//1250/0/114|4/4/114") == (
+        "I want to use Melissa. My current Hero Power is 1250.",
+        True,
+    )
+    assert tr.format_text("7/31471/4") == ("Thank you! Victory is ours! @4", True)
+    assert tr.format_text("7/154830/ 8") == ("Thanks, well done! @8", True)
+    assert tr.format_text("7/31684") == ("A balanced lineup! We got this!", True)
+    assert tr.format_text("8/48273/0") == ("Which hero should we ban?", True)
+    assert tr.format_text("12/40200") == ("[Emote] Genius!", True)
+    assert tr.format_text("12/40677") == ("[Emote] Hahaha!", True)
+    assert tr.format_text("2/2") == ("[Emoji] Love", True)
+    assert tr.format_text("2/0") == ("2/0", True)
+    assert tr.format_text("5/47544373") == ("5/47544373", True)
+
+    real_tmpl = REPO_ROOT / "data" / "chat_templates.json"
+    if real_tmpl.is_file():
+        for cap_name in ("draft_LIVE6.pcap", "draft_DRAFT.pcap", "draft_CHAT4.pcap"):
+            store, _, _ = _decode_pcap_whole(CAPTURES_DIR / cap_name, templates_path=real_tmpl)
+            for sess in store.get_matches():
+                for ev in sess.events:
+                    if ev.is_template and not ev.raw_text.startswith("2/0"):
+                        assert ev.display_text != ev.raw_text, f"{cap_name}: unexpanded {ev.raw_text!r}"
+                        assert "[-]" not in ev.display_text
+                        assert "[f6d57f]" not in ev.display_text
+
 
