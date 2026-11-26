@@ -280,3 +280,64 @@ The enemy's team-channel message is **in the inbound stream addressed to this cl
 ### 8.4 What remains true from the earlier sections
 
 The plaintext reads in §5–§6 were genuine for the uncompressed match (`0x52`). The anchored reads in §7 are still the right way to read the client store, and they are what exposed the id gap. The only correction is the conclusion drawn from the absence of text: absence in plaintext did not mean absence on the wire.
+
+---
+
+## 9. Corrected again: draft chat is readable, and the tags are channel ids (2026-11-26)
+
+Two earlier conclusions fall here.
+
+### 9.1 The `70 00 <ch>` container is the channel
+
+The byte after `70 00` is the **chat channel id**, not an arbitrary message type:
+
+| tag | channel | phase |
+|---|---|---|
+| `70 00 02` | 2 — Team | battle |
+| `70 00 03` | 3 — All | battle |
+| `70 00 04` | **4 — draft** | hero select |
+| `70 00 16` | 22 — loading | loading screen |
+
+Every tag confusion in §5–§6 dissolves into that one sentence.
+
+### 9.2 Draft chat is on the wire, plaintext, before battle starts
+
+Measured directly in `draft_DRAFT.pcap`, all three records inbound/outbound on UDP `:5001`, container `70 00 04`:
+
+| time (capture-relative) | direction | body | text |
+|---|---|---|---|
+| +621 s | out | `41 0c` | `1/team draft` |
+| **+645 s** | **in (enemy)** | `41 07` | **`1/Hi hi`** |
+| **+661 s** | **in (enemy)** | `41 0d` | **`1/I love Hora`** |
+
+Tick 0 (battle start) for that match is **+684.5 s**, so all three are draft-phase. Both inbound records come from the opposing player `68140340`.
+
+**Transport differs by phase, on the same UDP endpoint:**
+
+| phase | transport | frame | chat channel |
+|---|---|---|---|
+| draft / loading | KCP reliable subchannel `01 51`, msg `cd 08`, phase tag `03 02 46` / `03 03 46` | — | 4 / 22 |
+| battle | sequenced tick stream `01 75` from tick 0 (`03 01 46`) | LZW `0x42` or raw `0x52` | 2 / 3 |
+
+### 9.3 Structured suggestions are numeric templates, not words
+
+`Ban Kaja (Support)` never crosses the wire as English. It travels as a slash template and the client expands it locally:
+
+```
+3/<str_id>/<hero_id>     5/6/<hero_id>     7/<id>/<arg>     8/<id>/0
+1/<free text>
+```
+
+Expansion needs the quick-chat table — the 601 rows now readable via `tools/frida/fastchat_table_probe.js`. So the full chain is: wire template → `CData_BattleFastChatMessage` row → localised text.
+
+### 9.4 Lobby TCP is compressed, not encrypted
+
+An earlier note claimed `161.202.213.215:30101` was encrypted. Per-frame reassembly shows **315 frames: 256 raw, 59 Zstandard** (`28 b5 2f fd`, flag byte `0x10`), with `0` gaps in `188,106` inbound bytes. Decompressing all 59 yields lobby/party/roster data only — **no draft chat lives there**. Whole-flow entropy (~7.9) looked like encryption; per-frame entropy is bimodal (2.95–5.59 for raw frames, 6.29–7.98 for compressed), which is the signature of threshold-triggered compression.
+
+### 9.5 What this settles
+
+- **Enemy draft chat: readable**, both channels, plaintext, before battle.
+- **Enemy battle team chat: readable** after LZW decode (§8).
+- The client store is still the wrong instrument — it drops foreign battle team records and stamps draft records with `id=0`, which is why the two phases never shared a counter.
+
+The one thing still not captured: an enemy typing in the **loading** screen (channel 22). Same framing as draft, so it should be readable; untested.

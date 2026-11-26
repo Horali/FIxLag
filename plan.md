@@ -817,6 +817,32 @@ Consequence for tooling: a parser keyed only on `0x7002`/`0x7003` reports "no in
 
 ---
 
+### 5.17 What Network Boost actually does at the transport level (measured 2026-11-26)
+
+The duplication in §5.12 is now characterised at the layer that matters: how two copies of a stateful stream are reconciled.
+
+**Compression sits above the multipath fan-out.** The server compresses each tick once with a session-persistent LZW-16 dictionary and clones the resulting bytes into per-path transport wrappers. Only the outer 4-byte connection id differs:
+
+| capture | dual-path ticks compared | byte-identical payloads |
+|---|---|---|
+| `live_chat_check.pcap` | 217 | **217 / 217** |
+| `draft_CHAT4.pcap` | 1,697 | **1,697 / 1,697** |
+| `draft_DRAFT.pcap` | 2,331 | **2,331 / 2,331** |
+
+**Dedup happens before decompression, by tick index.** This is forced: a stateful dictionary cannot tolerate a duplicate or a gap, so the receiver must strip the outer header, deduplicate on the tick sequence number (first arrival wins), reorder, and only then feed one decoder. Confirmed by a mid-match path join in `draft_LIVE1.pcap` (Wi-Fi path dies at tick 4576; a new Wi-Fi path opens at tick 4631 carrying high-code bytes byte-identical to the surviving cellular path — impossible under per-path dictionaries).
+
+**Consequences for the user's latency question:**
+
+1. **Effective RTT is min(RTT over both paths), per tick.** Whichever copy arrives first is the one used; the other is discarded. That is exactly why Network Boost helps on a jittery link and why turning it off hurts.
+2. **Loss recovery is ARQ, not reset.** Cumulative tick ACKs are sent within ~1 ms, and redundant ticks are re-sent under a distinct message id (`0x519`) roughly 26–33 ms later. The dictionary is never reset on loss; the `0x0100` clear code fires when the 14-bit table fills (observed at code `0x3FD1` in tick 4590), unrelated to loss.
+3. **A second reliable channel exists for inputs only.** Each path opens a TCP socket at `UDP port + 50`, mirroring exactly two outbound message types byte-for-byte (player inputs `0x44c`, lockstep checksum `0x3f7`) with identical sequence numbers, median +0.12 ms after the UDP send. Inbound application bytes over those sockets: **zero**. So inputs are triple-redundant; state arrives over UDP on both paths.
+
+**Why this matters for the ping project.** The 40 ms-vs-19 ms question was never going to be fixed by link hygiene: the client already takes the best copy of every tick. What remains is which server you are given — §5.14 — and nothing at the transport layer changes that.
+
+---
+
+
+
 ## 6. Endpoint identification and classification
 
 ### 6.1 Finding an IP is not finding a server
