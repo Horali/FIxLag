@@ -700,6 +700,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         del.onclick = async (e) => {
           e.stopPropagation();
           await fetch(`/api/history/${encodeURIComponent(g.game_id)}`, { method: "DELETE" });
+          state.loadedHistoryGames.delete(g.game_id);
           if (state.selectedHistoryId === g.game_id) state.selectedHistoryId = null;
           await loadHistory(false);
         };
@@ -766,8 +767,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   function heroForEvent(ev, heroByUid) {
-    if (ev.sender_hero) return ev.sender_hero;
     if (ev.sender_uid && heroByUid && heroByUid.has(ev.sender_uid)) return heroByUid.get(ev.sender_uid);
+    if (ev.sender_hero) return ev.sender_hero;
     return "";
   }
 
@@ -895,6 +896,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     for (const ev of filteredEvents) timeline.push({ kind: "ev", ts: ev.ts || 0, item: ev });
     timeline.sort((a, b) => (a.ts - b.ts) || ((a.item.seq_id || 0) - (b.item.seq_id || 0)));
 
+    const prevScrollTop = el.feed.scrollTop;
     el.feed.innerHTML = "";
     if (timeline.length === 0) {
       const box = document.createElement("div");
@@ -992,14 +994,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
       el.feed.scrollTop = el.feed.scrollHeight;
       state.unread = 0;
       el.jumpLatest.style.display = "none";
+    } else {
+      el.feed.scrollTop = prevScrollTop;
     }
   }
 
-  async function selectHistoryGame(gameId) {
+  async function selectHistoryGame(gameId, forceReload = false) {
+    const prevSelected = state.selectedHistoryId;
     state.selectedHistoryId = gameId;
-    state.autoScroll = true;
+    if (gameId !== prevSelected) state.autoScroll = true;
     renderSidebar();
-    if (!state.loadedHistoryGames.has(gameId)) {
+    if (forceReload || !state.loadedHistoryGames.has(gameId)) {
       const res = await fetch(`/api/history/${encodeURIComponent(gameId)}`);
       if (res.ok) {
         const data = await res.json();
@@ -1011,14 +1016,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
     el.sidebar.classList.remove("open");
   }
 
-  async function loadHistory(autoSelectFirst) {
+  async function loadHistory(autoSelectFirst, forceReloadSelected = false) {
     try {
+      const prevSelectedId = state.selectedHistoryId;
+      const prevSelectedGame = prevSelectedId
+        ? (state.historyGames.find((g) => g.game_id === prevSelectedId) || state.loadedHistoryGames.get(prevSelectedId))
+        : null;
+      const wasScanning = !!(state.historyScan && state.historyScan.scanning);
+
       const res = await fetch(`/api/history?include_empty=${state.includeEmptyHistory ? 1 : 0}`);
       if (!res.ok) return;
       const data = await res.json();
       state.historyGames = data.games || [];
       state.historyCounts = { withChat: data.total_with_chat || 0, all: data.total_all || 0 };
       state.historyScan = data.scan || { scanning: false, done: 0, total: 0, current_file: "" };
+      const scanFinished = wasScanning && !state.historyScan.scanning;
+      if (scanFinished) state.loadedHistoryGames.clear();
 
       if (state.historyScan.scanning && !state.scanPollTimer) {
         state.scanPollTimer = setInterval(() => loadHistory(false), 1500);
@@ -1030,9 +1043,30 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if (autoSelectFirst && !state.userPickedTab && state.liveOrder.length === 0 && !state.status.capture_alive && state.historyGames.length > 0) {
         setTab("history", false);
       }
-      if (state.activeTab === "history" && !state.selectedHistoryId && state.historyGames.length > 0) {
-        await selectHistoryGame(state.historyGames[0].game_id);
-        return;
+      if (state.activeTab === "history") {
+        if (!state.selectedHistoryId && state.historyGames.length > 0) {
+          await selectHistoryGame(state.historyGames[0].game_id);
+          return;
+        }
+        if (state.selectedHistoryId) {
+          const stillListed = state.historyGames.some((g) => g.game_id === state.selectedHistoryId);
+          if (!stillListed) {
+            const prevBid = prevSelectedGame && prevSelectedGame.battle_id;
+            const replacement = (prevBid && state.historyGames.find((g) => g.battle_id === prevBid)) || state.historyGames[0] || null;
+            state.selectedHistoryId = replacement ? replacement.game_id : null;
+            if (state.selectedHistoryId) {
+              await selectHistoryGame(state.selectedHistoryId, true);
+              return;
+            }
+            renderSidebar();
+            renderMain();
+            return;
+          }
+          if (scanFinished || forceReloadSelected) {
+            await selectHistoryGame(state.selectedHistoryId, true);
+            return;
+          }
+        }
       }
       renderSidebar();
     } catch (_e) {}
@@ -1103,6 +1137,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       state.liveMatches.clear();
       state.liveOrder = [];
       state.selectedLiveId = null;
+      state.loadedHistoryGames.clear();
       if (d.status) state.status = d.status;
       renderTopStatus();
       renderSidebar();
@@ -1172,6 +1207,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if (state.activeTab === "live" && g.match_id === state.selectedLiveId) renderMain();
     });
 
+    es.addEventListener("history_updated", () => {
+      alive();
+      state.loadedHistoryGames.clear();
+      loadHistory(false, true);
+      refreshDevicesAndPcaps();
+    });
+
     es.onerror = () => {
       state.sseOk = false;
       renderTopStatus();
@@ -1226,8 +1268,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
   el.histAllCaps.onclick = () => { state.includeEmptyHistory = true; loadHistory(false); };
   el.historySearch.oninput = () => renderSidebar();
   document.getElementById("btnRescan").onclick = async () => {
+    state.loadedHistoryGames.clear();
     await fetch("/api/history/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    await loadHistory(false);
+    await loadHistory(false, true);
   };
 
   document.querySelectorAll("[data-side-filter]").forEach((btn) => {
