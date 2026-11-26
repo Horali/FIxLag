@@ -994,3 +994,212 @@ def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
             assert ch10_20 and all(ev[3] == "2/0" for ev in ch10_20)
 
 
+def test_14_hero_pick_tracking_live_swap_and_1203(tmp_path: Path) -> None:
+    def make_kcp_seg(conv: bytes, sn: int, body: bytes, frg: int = 0) -> bytes:
+        return b"\x01\x51" + conv + struct.pack("<IIIHBBH", 0, 1, sn, 64, frg, 0, len(body)) + body
+
+    def make_roster_msg(mid: int, players: list[tuple[int, int, int, str, int | None]]) -> bytes:
+        items = []
+        for uid, camp, seat, name, hero_id in sorted(players, key=lambda x: x[0]):
+            nb = name.encode("utf-8")
+            item = (
+                b"\x70\x00"
+                + _encode_varint(uid)
+                + b"\x01"
+                + _encode_varint(camp)
+                + b"\x02"
+                + _encode_varint(seat)
+                + b"\x43"
+                + _encode_varint(len(nb))
+                + nb
+            )
+            if hero_id is not None:
+                item += b"\x07" + _encode_varint(hero_id)
+            item += b"\x80"
+            items.append(item)
+        return b"\x70\x00" + _encode_varint(mid) + b"\x70\x50" + _encode_varint(len(items)) + b"".join(items) + b"\x80"
+
+    def make_1101(sub_items: list[bytes], phase_byte: int = 0x02) -> bytes:
+        inner = b"\x70\x51" + _encode_varint(len(sub_items)) + b"".join(sub_items) + b"\x80"
+        return b"\x70\x00\xcd\x08\x03" + bytes([phase_byte]) + b"\x46" + _encode_varint(len(inner)) + inner + b"\x80"
+
+    def make_ev33_hover(uid: int, hero_id: int) -> bytes:
+        body = b"\x70\x00" + _encode_varint(hero_id) + b"\x80"
+        return b"\x70\x00" + _encode_varint(uid) + b"\x01\x33\x43" + _encode_varint(len(body)) + body + b"\x80"
+
+    def make_ev34_confirm(uid: int, hero_id: int) -> bytes:
+        body = b"\x70\x00" + _encode_varint(hero_id) + b"\x80"
+        return b"\x70\x00" + _encode_varint(uid) + b"\x01\x34\x43" + _encode_varint(len(body)) + body + b"\x80"
+
+    def make_ev45_item(req_uid: int, hero_id: int, req_pos: int, ack_uid: int, ack_pos: int) -> bytes:
+        body = (
+            b"\x70\x00"
+            + _encode_varint(req_uid)
+            + b"\x01"
+            + _encode_varint(hero_id)
+            + b"\x02"
+            + _encode_varint(req_pos)
+            + b"\x03"
+            + _encode_varint(ack_uid)
+            + b"\x04"
+            + _encode_varint(ack_pos)
+            + b"\x80"
+        )
+        return b"\x70\x00" + _encode_varint(ack_uid) + b"\x01\x45\x43" + _encode_varint(len(body)) + body + b"\x80"
+
+    def make_ev06_item(slot: int, ch: int, text: str, msg_uid: str = "") -> bytes:
+        tb = text.encode("utf-8")
+        cb = b"\x70\x00" + _encode_varint(ch) + b"\x41" + _encode_varint(len(tb)) + tb
+        if msg_uid:
+            mb = msg_uid.encode("utf-8")
+            cb += b"\x4b" + _encode_varint(len(mb)) + mb
+        cb += b"\x80"
+        return b"\x70\x00" + _encode_varint(slot) + b"\x01\x06\x43" + _encode_varint(len(cb)) + cb + b"\x80"
+
+    def feed_pkt(router: SessionRouter, ts: float, payload: bytes, *, direction: str = "in") -> None:
+        if direction == "out":
+            pkt_bytes = _build_udp_ipv4_packet("10.0.0.1", 40000, "2.2.2.2", 5509, payload)
+        else:
+            pkt_bytes = _build_udp_ipv4_packet("2.2.2.2", 5509, "10.0.0.1", 40000, payload)
+        rdr = IncrementalPcapReader()
+        for pkt in rdr.feed(_pcap_header(LINKTYPE_RAW) + _pcap_record(int(ts), 0, pkt_bytes)):
+            router.on_packet(pkt)
+
+    tmpl_file = tmp_path / "heroes.json"
+    tmpl_file.write_text(
+        json.dumps(
+            {
+                "messages": {"2/9": "I'll go Exp Lane."},
+                "heroes": {
+                    "17": "Fanny",
+                    "41": "Gatotkaca",
+                    "55": "Angela",
+                    "88": "Masha",
+                    "122": "Nolan",
+                    "129": "Zetian",
+                    "131": "Sora",
+                    "133": "Hirara",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    tr = TemplateResolver(tmpl_file)
+    store = MatchStore()
+    router = SessionRouter(store=store, templates=tr)
+    conv = b"\x12\x34\x56\x78"
+
+    # Identify local uid=1000 via outbound mid=1001, then deliver mid=1202 roster.
+    out_1001 = b"\x70\x00" + _encode_varint(1001) + b"\x70\x00" + _encode_varint(1000) + b"\x80\x80"
+    feed_pkt(router, 9.0, make_kcp_seg(conv, 0, out_1001), direction="out")
+    feed_pkt(
+        router,
+        10.0,
+        make_kcp_seg(conv, 0, make_roster_msg(1202, [(1000, 1, 0, "Self", None), (2000, 1, 1, "Bob", None), (3000, 1, 2, "Alice", None), (4000, 2, 0, "Foe", None)])),
+    )
+    sess = store.get_matches()[0]
+    assert sess.players_by_uid[2000].hero_id is None
+    assert sess.players_by_uid[2000].hero_name == ""
+
+    # Chat before pick has empty sender_hero.
+    feed_pkt(router, 11.0, make_kcp_seg(conv, 1, make_1101([make_ev06_item(0x11, 1, "2/9", "999-2000-1")])))
+    assert sess.events[-1].sender_hero_id is None
+    assert sess.events[-1].sender_hero == ""
+
+    # Hover ev=0x33 must NOT set picked hero.
+    feed_pkt(router, 12.0, make_kcp_seg(conv, 2, make_1101([make_ev33_hover(2000, 17)])))
+    assert sess.players_by_uid[2000].hero_id is None
+
+    # Confirm lock-in ev=0x34 sets hero, backfills earlier chat event, and publishes match_update.
+    feed_pkt(router, 13.0, make_kcp_seg(conv, 3, make_1101([make_ev34_confirm(2000, 17)])))
+    assert sess.players_by_uid[2000].hero_id == 17
+    assert sess.players_by_uid[2000].hero_name == "Fanny"
+    assert sess.events[0].sender_hero_id == 17
+    assert sess.events[0].sender_hero == "Fanny"
+    updates = [d for _, ename, d in store._replay_log if ename == "match_update"]
+    assert updates
+    assert any(
+        p["uid"] == 2000 and p["hero_name"] == "Fanny"
+        for p in updates[-1]["players"]
+    )
+    assert updates[-1]["events"][0]["sender_hero"] == "Fanny"
+
+    # Alice confirms 55 (Angela), then ev=0x45 help-picks 55 for Bob and swaps slots (0x11 <-> 0x12).
+    feed_pkt(router, 14.0, make_kcp_seg(conv, 4, make_1101([make_ev34_confirm(3000, 55)])))
+    feed_pkt(router, 15.0, make_kcp_seg(conv, 5, make_1101([make_ev45_item(req_uid=2000, hero_id=55, req_pos=2, ack_uid=3000, ack_pos=3)])))
+    assert sess.players_by_uid[2000].hero_id == 55
+    assert sess.players_by_uid[2000].hero_name == "Angela"
+    assert sess.events[0].sender_hero == "Angela"
+    assert sess.players_by_uid[3000].hero_id is None
+    assert sess.slot_to_uid[0x12] == 2000
+    assert sess.slot_to_uid[0x11] == 3000
+
+    # Alice locks 133 (Hirara); Foe auto-locks 17 without ev=0x34, reconciled via mid=1203 without undoing swapped seats!
+    feed_pkt(router, 16.0, make_kcp_seg(conv, 6, make_1101([make_ev34_confirm(3000, 133)])))
+    feed_pkt(
+        router,
+        17.0,
+        make_kcp_seg(conv, 7, make_roster_msg(1203, [(1000, 1, 0, "Self", 88), (2000, 1, 1, "Bob", 55), (3000, 1, 2, "Alice", 133), (4000, 2, 0, "Foe", 17)])),
+    )
+    assert {u: sess.players_by_uid[u].hero_name for u in (1000, 2000, 3000, 4000)} == {
+        1000: "Masha",
+        2000: "Angela",
+        3000: "Hirara",
+        4000: "Fanny",
+    }
+    assert sess.slot_to_uid[0x12] == 2000
+    assert sess.slot_to_uid[0x11] == 3000
+    feed_pkt(router, 18.0, make_kcp_seg(conv, 8, make_1101([make_ev06_item(0x20, 3, "glhf", "999-4000-2")])))
+    assert sess.events[-1].side == "ENEMY"
+    assert sess.events[-1].sender_hero == "Fanny"
+
+    # Real capture draft_LIVE6.pcap: ev=0x45 help-pick + ev=0x34 + mid=1203, zero anomalies.
+    store_d6, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_LIVE6.pcap", templates_path=tmpl_file)
+    m1, m2 = store_d6.get_matches()
+    assert m1.anomalies == []
+    assert m1.players_by_uid[338471731].hero_name == "Nolan"
+    assert m1.players_by_uid[389466225].hero_name == "Gatotkaca"
+    assert any(ev.sender_uid == 338471731 and ev.sender_hero == "Nolan" for ev in m1.events)
+    assert any(ev.raw_text == "1/Last game" and ev.sender_hero == "Gatotkaca" for ev in m1.events)
+
+    assert m2.anomalies == []
+    assert m2.players_by_uid[88409820].hero_name == "Zetian"
+    assert m2.players_by_uid[1382063784].hero_name == "Sora"
+    assert any(ev.raw_text == "kal long u" and ev.sender_hero == "Sora" for ev in m2.events)
+
+    # Mid-match capture leaves hero fields empty cleanly.
+    store_mid, _, _ = _decode_pcap_whole(CAPTURES_DIR / "live_chat_check.pcap", templates_path=tmpl_file)
+    for m_mid in store_mid.get_matches():
+        assert all(p.hero_id is None and p.hero_name == "" for p in m_mid.players_by_uid.values())
+        assert all(ev.sender_hero_id is None and ev.sender_hero == "" for ev in m_mid.events)
+
+    # Real full templates check on live_20261126_234439.pcap if present on disk.
+    real_tmpl = REPO_ROOT / "data" / "chat_templates.json"
+    live_cap = CAPTURES_DIR / "live_20261126_234439.pcap"
+    if real_tmpl.is_file() and live_cap.is_file():
+        store_live, _, _ = _decode_pcap_whole(live_cap, templates_path=real_tmpl)
+        m_live = store_live.get_matches()[0]
+        assert len(m_live.players_by_uid) == 10
+        by_name = {p.name: p.hero_name for p in m_live.players_by_uid.values()}
+        assert all(by_name.values())
+        assert by_name["naradira"] == "Ling"
+        assert by_name["mashasha"] == "Argus"
+        assert by_name["Chudvial999"] == "Sun"
+        assert by_name["SnowBall"] == "Angela"
+        assert any(ev.sender_name == "mashasha" and ev.raw_text == "2/9" and ev.sender_hero == "Argus" for ev in m_live.events)
+
+    # UI HTML serves hero badge styles and helper.
+    app = create_app(
+        captures_dir=CAPTURES_DIR,
+        templates_path=tmpl_file,
+        history_dir=tmp_path / "hist",
+        auto_scan_history=False,
+    )
+    with TestClient(app) as client:
+        r_home = client.get("/")
+        assert r_home.status_code == 200
+        assert ".hero-tag" in r_home.text
+        assert ".chip-hero" in r_home.text
+        assert "heroForEvent" in r_home.text
+
+
