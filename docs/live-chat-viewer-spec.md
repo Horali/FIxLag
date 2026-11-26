@@ -108,11 +108,13 @@ Identify matches by `(server_ip, server_port)` + authoritative `battleid` + phas
 ## 6. Draft & Loading Decoder (`01 51` / `41 51` KCP + LZ4)
 
 ### 6.1 Extended KCP Header (`0x01` vs `0x41`)
-Packets on the KCP subchannel use **both** 24-byte and 28-byte headers (ignoring `0x41` silently drops real fragments, e.g. `sn=7` of `sn=5..20` in `captures/draft_LIVE6.pcap`, and crashes LZ4):
+Packets on the KCP subchannel use **both** `0x01` and `0x41` frames (ignoring `0x41` silently drops real fragments, e.g. `sn=7` of `sn=5..20` in `captures/draft_LIVE6.pcap`, and crashes LZ4):
 - **`01 51` / `01 52` (24-byte header):**
   `[b0=0x01][cmd=0x51|0x52][conv:4][una:4 LE][ts:4 LE][sn:4 LE][wnd:2 LE][frg:1][comp:1][len:2 LE]`
-- **`41 51` / `41 52` (28-byte header):**
-  `[b0=0x41][cmd=0x51|0x52][conv:4][ext:4][una:4 LE][ts:4 LE][sn:4 LE][wnd:2 LE][frg:1][comp:1][len:2 LE]`
+- **`41 51` / `41 52` (packet-level raw LZ4 wrapper):**
+  `[b0=0x41][cmd=0x51|0x52][conv:4][ulen_varint][raw_lz4_block_to_end_of_datagram]`
+  - Verified against all 244 `41 51`/`41 52` frames across `draft_CHAT4.pcap`, `draft_DRAFT.pcap`, `draft_LIVE6.pcap`, and `draft_CHAT3.pcap`: decompressing `buf[off:]` to `ulen` yields `[una:4 LE][ts:4 LE][sn:4 LE][wnd:2 LE][frg:1][comp:1][len:2 LE][body...]` plus any subsequent concatenated `01 51`/`01 52` segments. Prepend `[0x01, cmd] + conv` and continue parsing iteratively.
+  - `41 51`/`41 52` may appear either at offset `0` or mid-datagram after an earlier `01 51` segment.
 - A single UDP datagram may pack multiple concatenated KCP segments (`01 51`/`01 52`/`41 51`/`41 52`) or `01 75` subframes; parse iteratively until payload exhaustion.
 
 ### 6.2 Safe Per-`conv` KCP Reassembly & Raw LZ4 Block Decode
@@ -143,8 +145,11 @@ Inspect reassembled/decompressed KCP payloads:
 
 1. **Coalesced subframes:** Iterate `01 75 <conv:4> <plen_le16:2> <subframe>` records inside each datagram (1–3 subframes per datagram).
 2. **Tick envelope (`03 01 46 <ln_varint> <inner>`):**
-   - Check `inner[0] == 0x70`. Read base tick `seq` if `inner[1] == 0x00` (`read_varint`), else `seq = 0`. Skip optional `01 <byte>` pair.
-   - Read repeated `<tag> <flen_varint> <chunk>` entries until `0x80`, incrementing `tick_idx` per tagged tick (`0x42..0x46` LZW-16; `0x52`/`0x53` raw).
+   - Check `inner[0] == 0x70`. Read base tick `seq` if `inner[1] == 0x00` (`read_varint`), else `seq = 0`.
+   - If the next byte is `0x01`, consume a **varint** (`read_varint`, not a fixed 1-byte skip, as values like `386` are multi-byte).
+   - Read repeated `<tag>` entries until `0x80`:
+     - `0x42..0x46` (wire-type 4 LZW-16 chunks): `<flen_varint> <chunk>`, `tick_idx = seq + (tag - 0x42)`.
+     - `0x52..0x56` (wire-type 5 raw uncompressed struct lists, as in `captures/draft_CHAT3.pcap`): `<count_varint> <mlbb_items...>`, `tick_idx = seq + (tag - 0x52)`. Raw mode carries no cross-tick dictionary dependency and skips missing empty ticks without stalling.
 3. **Deduplicate & reorder *before* LZW mutation:**
    - Each match maintains `pending: dict[int, tuple[int, bytes]]` and `next_tick`.
    - `on_tick(tick_idx, tag, chunk)`: if `tick_idx < next_tick` or `tick_idx in pending`, discard immediately (first arrival across Wi-Fi/cellular wins). Otherwise insert into `pending`.
@@ -207,3 +212,23 @@ Run `pytest` offline against the real archived captures in `captures/` plus synt
 7. **`captures/draft_RELOG.pcap`:** Two separate matches sharing port `5007` (`164.52.109.153:5007` and `164.52.38.98:5007`) split cleanly into 2 matches.
 8. **Chunked partial-read fuzz test:** Feeding a PCAP incrementally in irregular `1..37`-byte chunks produces the exact same match/event sequence as whole-file decoding.
 9. **HTTP/SSE integration test (`starlette.testclient.TestClient`):** Verifies `GET /`, `GET /api/matches`, `GET /api/pcaps`, and `GET /events` including `Last-Event-ID` replay.
+
+---
+
+## 11. Usage & CLI
+
+Run strictly on `127.0.0.1` (default port `8765`) using either `python -m tools.chat_viewer` or `python tools/live_chat_viewer.py`:
+
+```sh
+# Offline replay of an archived capture
+python -m tools.chat_viewer --pcap captures/draft_CHAT4.pcap
+
+# Tail a growing local capture
+python -m tools.chat_viewer --pcap captures/live.pcap --follow --port 8765
+
+# Live ADB stream (always specify -s serial via --adb; optionally tee to captures/live_<ts>.pcap)
+python -m tools.chat_viewer --adb <serial> --tee
+
+# Full offline + HTTP/SSE test suite
+pytest -v tests/test_chat_viewer.py
+```

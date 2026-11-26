@@ -19,6 +19,24 @@ tcpdump captures, SLL2-aware, reports the interface each flow used.
 a labelled capture through the root daemon and names the match endpoint at draft
 pick, before a match is played.
 
+**Live passive chat viewer:** [`tools/chat_viewer/`](tools/chat_viewer/__main__.py) — localhost-only
+(`127.0.0.1`) Starlette + Uvicorn web viewer merging draft, loading, and battle
+chat (ally + enemy) from live ADB `tcpdump` or local `.pcap` files:
+
+```sh
+# Replay a saved capture
+python -m tools.chat_viewer --pcap captures/draft_CHAT4.pcap
+
+# Tail an actively growing .pcap on custom port
+python -m tools.chat_viewer --pcap captures/live.pcap --follow --port 8765
+
+# Live stream from rooted Android via binary-clean adb exec-out (+ tee copy)
+python -m tools.chat_viewer --adb <serial> --tee
+
+# Run regression & HTTP/SSE integration suite
+pytest -v tests/test_chat_viewer.py
+```
+
 **Next experiment:** [`docs/experiment-restart-vs-host.md`](docs/experiment-restart-vs-host.md).
 
 Commits: Conventional Commits, small, `main`, no AI attribution.
