@@ -727,6 +727,28 @@ That would make §5.8's KL result a mode effect with a one-sample host correlati
 
 **Caveat.** The user changed Wi-Fi network and made a network-side edit before match 1, so displayed-ping comparisons across this evening are weaker than the endpoint comparisons. Endpoint identity does not care about the link.
 
+### 5.15 A custom match against bots never talks to a server (measured 2026-11-26)
+
+Found while trying to capture in-match chat: during a live **custom match against bots**, the phone produced no match traffic at all, and the game process held no IP sockets.
+
+| Check (while the match was live on screen) | Result |
+|---|---|
+| `tcpdump -i any` for 10 s | **34 packets**, all wlan0 browser/QUIC |
+| `tcpdump -i rmnet_data0` for 10 s | **0 packets** |
+| `/proc/net/dev` over 8 s | wlan0 +1.9 kB rx / +2.5 kB tx; rmnet **+0** |
+| UDP/TCP sockets owned by MLBB uid 10372 | **none** |
+| The 9 socket fds the process holds, mapped into `/proc/net/*` | **none of them are TCP or UDP** |
+| Network namespace of the game vs init | same (`net:[4026531840]`) |
+
+**Conclusion: a bot match is simulated on the client.** The game is rendering a live timer and scoreboard with no server connection, so nothing is on the wire. Chat typed in one is displayed locally and goes nowhere.
+
+**Two consequences.**
+
+1. **Chat experiments cannot use bot matches.** They need a real online match — classic, ranked, or a custom room with humans.
+2. It is a useful negative result for the whole project: any capture taken during a bot match will show *no* match endpoint, and that is not a capture failure, so do not chase it.
+
+**Unrelated but worth writing down.** The phone has been on a university enterprise Wi-Fi while these checks ran. Campus networks commonly filter non-standard UDP, so if a future match connects poorly or not at all, the campus link is the first suspect, not the phone.
+
 ---
 
 ## 6. Endpoint identification and classification
