@@ -15,6 +15,7 @@ from .templates import TemplateResolver
 
 DEFAULT_HISTORY_DIR = Path(__file__).resolve().parents[2] / "data" / "chat_history"
 MIN_PCAP_BYTES = 100
+CACHE_SCHEMA_VERSION = 2
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -165,6 +166,16 @@ class MatchHistoryStore:
         }
         self._load_disk()
 
+    def _templates_signature(self) -> list[int] | None:
+        tpath = self.templates.path
+        if not tpath or not tpath.is_file():
+            return None
+        try:
+            st = tpath.stat()
+            return [st.st_size, st.st_mtime_ns]
+        except OSError:
+            return None
+
     def _load_disk(self) -> None:
         live_raw = _read_json_safe(self._live_path)
         games_map = live_raw.get("games") if isinstance(live_raw.get("games"), dict) else live_raw
@@ -177,7 +188,9 @@ class MatchHistoryStore:
                     self._live_games[gid] = rec
 
         cache_raw = _read_json_safe(self._cache_path)
-        files_map = cache_raw.get("files") if isinstance(cache_raw.get("files"), dict) else cache_raw
+        if cache_raw.get("version") != CACHE_SCHEMA_VERSION:
+            return
+        files_map = cache_raw.get("files") if isinstance(cache_raw.get("files"), dict) else {}
         if isinstance(files_map, dict):
             for fname, entry in files_map.items():
                 if (
@@ -195,7 +208,7 @@ class MatchHistoryStore:
 
     def _persist_pcap_cache(self) -> None:
         with self._lock:
-            snap = {"version": 1, "files": dict(self._pcap_cache)}
+            snap = {"version": CACHE_SCHEMA_VERSION, "files": dict(self._pcap_cache)}
         with self._io_lock:
             _atomic_write_json(self._cache_path, snap)
 
@@ -277,6 +290,7 @@ class MatchHistoryStore:
                     break
                 st = p.stat()
                 sig = (st.st_size, st.st_mtime_ns)
+                tmpl_sig = self._templates_signature()
                 with self._lock:
                     cached = self._pcap_cache.get(p.name)
                     self._scan_state["current_file"] = p.name
@@ -285,6 +299,7 @@ class MatchHistoryStore:
                     and cached is not None
                     and cached.get("size") == sig[0]
                     and cached.get("mtime_ns") == sig[1]
+                    and cached.get("templates_sig") == tmpl_sig
                 ):
                     with self._lock:
                         self._scan_state["done"] = idx
@@ -295,7 +310,12 @@ class MatchHistoryStore:
                 except (OSError, InvalidPcapMagicError):
                     records = []
 
-                entry = {"size": sig[0], "mtime_ns": sig[1], "games": records}
+                entry = {
+                    "size": sig[0],
+                    "mtime_ns": sig[1],
+                    "templates_sig": tmpl_sig,
+                    "games": records,
+                }
                 with self._lock:
                     self._pcap_cache[p.name] = entry
                     self._scan_state["done"] = idx
@@ -360,6 +380,7 @@ class MatchHistoryStore:
                         self._pcap_cache[target.name] = {
                             "size": st.st_size,
                             "mtime_ns": st.st_mtime_ns,
+                            "templates_sig": self._templates_signature(),
                             "games": records,
                         }
                     self._persist_pcap_cache()
