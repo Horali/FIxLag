@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -51,13 +52,23 @@ def create_app(
     templates = TemplateResolver(templates_path)
     store = MatchStore()
     router = SessionRouter(store=store, templates=templates)
-    history = MatchHistoryStore(captures_dir=cap_dir, history_dir=history_dir, templates=templates)
+
+    def _notify_history_changed() -> None:
+        store.publish("history_updated", {"ts": time.time()})
+
+    history = MatchHistoryStore(
+        captures_dir=cap_dir,
+        history_dir=history_dir,
+        templates=templates,
+        on_change=_notify_history_changed,
+    )
     ingest = IngestController(
         router=router,
         store=store,
         captures_dir=cap_dir,
         adb_path=adb_path,
         on_live_snapshot=history.save_live_matches,
+        on_tee_finished=history.index_pcap_file,
     )
 
     async def index(_request: Request) -> HTMLResponse:

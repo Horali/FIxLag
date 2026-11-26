@@ -7,7 +7,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .pcap_reader import IncrementalPcapReader, InvalidPcapMagicError
 from .session import MatchStore, SessionRouter
@@ -114,6 +114,50 @@ def _summarize_game(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _same_match_record(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    bid_a = str(a.get("battle_id") or "").strip()
+    bid_b = str(b.get("battle_id") or "").strip()
+    if bid_a and bid_b:
+        return bid_a == bid_b
+    ip_a = a.get("server_ip")
+    if ip_a and ip_a == b.get("server_ip") and a.get("server_port") == b.get("server_port"):
+        ts_a = float(a.get("first_ts") or 0.0)
+        ts_b = float(b.get("first_ts") or 0.0)
+        return abs(ts_a - ts_b) <= 5.0
+    return False
+
+
+def _record_quality(rec: dict[str, Any]) -> tuple[int, int, int, int, float]:
+    events_count = len(rec.get("events") or [])
+    heroes_count = sum(
+        1
+        for p in (rec.get("players") or [])
+        if isinstance(p, dict) and (p.get("hero_id") or p.get("hero_name"))
+    )
+    players_count = len(rec.get("players") or [])
+    is_pcap = 1 if rec.get("origin") == "pcap" else 0
+    last_ts = float(rec.get("last_ts") or rec.get("first_ts") or 0.0)
+    return (events_count, heroes_count, players_count, is_pcap, last_ts)
+
+
+def _dedup_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    clusters: list[list[dict[str, Any]]] = []
+    for rec in records:
+        matched_idxs = [
+            idx
+            for idx, cluster in enumerate(clusters)
+            if any(_same_match_record(existing, rec) for existing in cluster)
+        ]
+        if not matched_idxs:
+            clusters.append([rec])
+            continue
+        merged = [rec]
+        for idx in reversed(matched_idxs):
+            merged.extend(clusters.pop(idx))
+        clusters.append(merged)
+    return [max(cluster, key=_record_quality) for cluster in clusters]
+
+
 def _decode_pcap_to_records(path: Path, templates: TemplateResolver) -> list[dict[str, Any]]:
     store = MatchStore()
     router = SessionRouter(store=store, templates=templates)
@@ -144,10 +188,12 @@ class MatchHistoryStore:
         captures_dir: Path,
         history_dir: Path | None = None,
         templates: TemplateResolver | None = None,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         self.captures_dir = Path(captures_dir)
         self.history_dir = Path(history_dir) if history_dir is not None else DEFAULT_HISTORY_DIR
         self.templates = templates if templates is not None else TemplateResolver()
+        self.on_change = on_change
 
         self._live_path = self.history_dir / "live_games.json"
         self._cache_path = self.history_dir / "pcap_cache.json"
@@ -240,7 +286,15 @@ class MatchHistoryStore:
         with self._io_lock:
             _atomic_write_json(self._cache_path, snap)
 
-    def save_live_matches(self, matches: list[dict[str, Any]]) -> None:
+    def _notify_change(self) -> None:
+        cb = self.on_change
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def save_live_matches(self, matches: list[dict[str, Any]]) -> bool:
         """Persist any live/followed match containing chat events or gap warnings."""
         changed = False
         with self._lock:
@@ -261,6 +315,8 @@ class MatchHistoryStore:
                 changed = True
         if changed:
             self._persist_live()
+            self._notify_change()
+        return changed
 
     def delete_live_game(self, game_id: str) -> bool:
         """Delete a saved live game by `live:...` id; refuse `pcap:...` items."""
@@ -270,7 +326,34 @@ class MatchHistoryStore:
             removed = self._live_games.pop(game_id, None) is not None
         if removed:
             self._persist_live()
+            self._notify_change()
         return removed
+
+    def index_pcap_file(self, path: Path) -> bool:
+        """Decode and cache a single PCAP inside `captures_dir`."""
+        try:
+            cap_root = self.captures_dir.resolve()
+            target = Path(path).resolve()
+            target.relative_to(cap_root)
+        except (OSError, ValueError):
+            return False
+        if not target.is_file() or target.stat().st_size < MIN_PCAP_BYTES:
+            return False
+        st = target.stat()
+        try:
+            records = _decode_pcap_to_records(target, self.templates)
+        except (OSError, InvalidPcapMagicError):
+            return False
+        with self._lock:
+            self._pcap_cache[target.name] = {
+                "size": st.st_size,
+                "mtime_ns": st.st_mtime_ns,
+                "templates_sig": self._templates_signature(),
+                "games": records,
+            }
+        self._persist_pcap_cache()
+        self._notify_change()
+        return True
 
     def stop_scan(self, timeout: float = 2.0) -> None:
         """Stop background PCAP indexing cleanly on shutdown."""
@@ -297,21 +380,37 @@ class MatchHistoryStore:
             return dict(self._scan_state)
 
     def _scan_worker(self, force: bool) -> None:
+        any_changed = False
         try:
             if not self.captures_dir.is_dir():
+                with self._lock:
+                    if self._pcap_cache:
+                        self._pcap_cache.clear()
+                        any_changed = True
+                if any_changed:
+                    self._persist_pcap_cache()
                 return
             files = sorted(
                 (p for p in self.captures_dir.glob("*.pcap") if p.is_file() and p.stat().st_size >= MIN_PCAP_BYTES),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
+            present = {p.name for p in files}
+            pruned = False
             with self._lock:
+                stale = [fname for fname in self._pcap_cache if fname not in present]
+                for fname in stale:
+                    del self._pcap_cache[fname]
+                    pruned = True
+                    any_changed = True
                 self._scan_state = {
                     "scanning": True,
                     "done": 0,
                     "total": len(files),
                     "current_file": "",
                 }
+            if pruned:
+                self._persist_pcap_cache()
 
             for idx, p in enumerate(files, 1):
                 if self._stop_event.is_set():
@@ -347,14 +446,18 @@ class MatchHistoryStore:
                 with self._lock:
                     self._pcap_cache[p.name] = entry
                     self._scan_state["done"] = idx
+                any_changed = True
                 self._persist_pcap_cache()
+                self._notify_change()
         finally:
             with self._lock:
                 self._scan_state["scanning"] = False
                 self._scan_state["current_file"] = ""
+            if any_changed:
+                self._notify_change()
 
     def list_games(self, *, include_empty: bool = False) -> dict[str, Any]:
-        """Return newest-first game summaries across live history and cached PCAPs."""
+        """Return newest-first deduplicated game summaries across live history and cached PCAPs."""
         all_records: list[dict[str, Any]] = []
         with self._lock:
             all_records.extend(self._live_games.values())
@@ -362,7 +465,8 @@ class MatchHistoryStore:
                 all_records.extend(entry.get("games") or [])
             scan = dict(self._scan_state)
 
-        summaries = [_summarize_game(r) for r in all_records]
+        deduped = _dedup_records(all_records)
+        summaries = [_summarize_game(r) for r in deduped]
         summaries.sort(key=lambda g: (g["started_at"], g["game_id"]), reverse=True)
         total_all = len(summaries)
         with_chat = [g for g in summaries if g["total_events"] > 0]

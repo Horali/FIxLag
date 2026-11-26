@@ -78,13 +78,15 @@ class IngestController:
         store: MatchStore,
         captures_dir: Path,
         adb_path: Path | str | None = None,
-        on_live_snapshot: Callable[[list[dict[str, Any]]], None] | None = None,
+        on_live_snapshot: Callable[[list[dict[str, Any]]], Any] | None = None,
+        on_tee_finished: Callable[[Path], Any] | None = None,
     ) -> None:
         self.router = router
         self.store = store
         self.captures_dir = Path(captures_dir)
         self.adb_path_override = adb_path
         self.on_live_snapshot = on_live_snapshot
+        self.on_tee_finished = on_tee_finished
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -289,6 +291,12 @@ class IngestController:
             if tee_fh is not None:
                 try:
                     tee_fh.close()
+                except OSError:
+                    pass
+            if tee_path is not None and self.on_tee_finished is not None:
+                try:
+                    if tee_path.is_file():
+                        self.on_tee_finished(tee_path)
                 except OSError:
                     pass
 
