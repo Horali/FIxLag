@@ -6,10 +6,10 @@ Finding: ping variance is server-side (city/provider/IP); client-side tools only
 
 ## Current state
 - Research phase complete; `tools/parse_pcap.py` and `tools/draft_probe.py` work via rooted ADB on SM-S936B (`RRCY1032Y6F`).
-- `tools/chat_viewer` runs a `127.0.0.1` web + SSE viewer for live ADB tcpdump or saved `.pcap` replays.
-- Hero picks update live in both Classic and Ranked draft via `ev=0x34`, `ev=0x45`, and `mid=1203`, publishing `match_update` over SSE.
+- `tools/chat_viewer` runs a `127.0.0.1` web + SSE viewer for live ADB tcpdump or saved `.pcap` replays (`mid=1242`/`1230`/`1202`/`1203`, mode, country, bot, party size, hero picks).
 - Past Games deduplicates `live:` vs `pcap:` records by `battle_id` (fallback `(ip, port, first_ts <= 5s)`), prefers richer/newer `.pcap` records, auto-indexes teed captures on stop, and pushes `history_updated` SSE events.
-- Test suite (`pytest -v tests/test_chat_viewer.py`): 15 tests passing.
+- Specification ready for FIxLag Server & Live Packet Mapper (`127.0.0.1:8766`): [docs/lag-mapper-spec.md](docs/lag-mapper-spec.md).
+- Test suite (`pytest -v tests/test_chat_viewer.py`): 16 tests passing.
 
 ## Active tasks
 _(none)_
@@ -20,6 +20,7 @@ _(none)_
 - Full measurement notes: [plan.md](plan.md)
 - Passive chat viewer: [tools/chat_viewer/](tools/chat_viewer/__main__.py)
 - Viewer tests: [tests/test_chat_viewer.py](tests/test_chat_viewer.py)
+- Server & packet mapper spec: [docs/lag-mapper-spec.md](docs/lag-mapper-spec.md)
 
 ## Rules & conventions
 - Always pass `-s <serial>` to `adb`; phone root uses `su -c`.
