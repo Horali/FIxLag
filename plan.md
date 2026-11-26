@@ -803,6 +803,18 @@ So other players' chat reaches the client in the clear, on the all-chat channel.
 
 **Practical note.** Enemy **all-chat** is relayed to every client by definition, so it is readable on the wire — but it is also already visible in the game UI, so this adds no informational advantage. The only real question is the team channel.
 
+**Second framing, found in a custom room (2026-11-26).** The chat container tag is not fixed. In a custom room the same match server carried chat as **`0x7004`** with a **`N/` prefix inside the text**, while the solo classic used `0x7002`/`0x7003` with no prefix:
+
+```
+out  "team draft"    ->  70 00 04  41 0c  "1/team draft"
+in   "Hi hi"         ->  70 00 04  41 07  "1/Hi hi"
+in   "I love Hora"   ->  70 00 04  41 0d  "1/I love Hora"
+```
+
+Consequence for tooling: a parser keyed only on `0x7002`/`0x7003` reports "no inbound chat" on a match that plainly had one. `tools/chat_extract.py` now accepts `0x7002`, `0x7003` and `0x7004` and surfaces the `N/` prefix rather than swallowing it. Whether the prefix is a channel id or a message-type id is not yet established.
+
+**What the custom-room capture shows.** Two inbound records from other players (`Hi hi` at 11:00:37, `I love Hora` at 11:00:53) and no inbound record without the `N/` prefix. So other players' chat does reach the client in the custom-room mode as well; the earlier "nothing arrived" reading was a parser gap, not a protocol fact.
+
 ---
 
 ## 6. Endpoint identification and classification

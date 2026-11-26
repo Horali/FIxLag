@@ -32,7 +32,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import parse_pcap as pp  # noqa: E402
 
-CHANNELS = {b"\x70\x00\x02": "TEAM", b"\x70\x00\x03": "ALL "}
+CHANNELS = {b"\x70\x00\x02": "T7002", b"\x70\x00\x03": "T7003", b"\x70\x00\x04": "T7004"}
 MATCH_PORT_LO, MATCH_PORT_HI = 5000, 5999
 
 
@@ -88,11 +88,24 @@ def iter_payloads(path):
 
 
 def phase_boundary(path):
-    """Timestamp of the first packet to/from a match port."""
-    for ts, _p, _s, sp, _d, dp, _b, _c in iter_payloads(path):
-        if MATCH_PORT_LO <= dp <= MATCH_PORT_HI or MATCH_PORT_LO <= sp <= MATCH_PORT_HI:
-            return ts
-    return None
+    """Timestamp when the sustained match flow starts.
+
+    Keyed on the busiest destination in the match port band, not the first one
+    seen: a single stray packet to 5xxx is common (and mDNS 5353 sits inside
+    the band), while the match server keeps tens of thousands of packets.
+    """
+    counts = {}
+    firsts = {}
+    for ts, _p, _s, _sp, dst, dp, _b, _c in iter_payloads(path):
+        if 5353 == dp or not (MATCH_PORT_LO <= dp <= MATCH_PORT_HI):
+            continue
+        key = (dst, dp)
+        counts[key] = counts.get(key, 0) + 1
+        firsts.setdefault(key, ts)
+    if not counts:
+        return None
+    busiest = max(counts, key=lambda k: counts[k])
+    return firsts[busiest]
 
 
 def chat_records(body):
@@ -146,9 +159,13 @@ def printable_runs(data, minlen):
 
 def decode(raw):
     try:
-        return raw.decode("utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return raw.decode("latin-1", "replace")
+    # Some chat records carry a "N/" prefix -- a channel or message-type id.
+    if len(text) > 2 and text[0].isdigit() and text[1] == "/":
+        return "ch%s|%s" % (text[0], text[2:])
+    return text
 
 
 def main():
