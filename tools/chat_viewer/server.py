@@ -119,10 +119,22 @@ def create_app(
             except ValueError:
                 last_id = None
 
+        once = request.query_params.get("once", "").strip().lower() in ("1", "true", "yes")
+        max_events: int | None = None
+        raw_max = request.query_params.get("max_events")
+        if raw_max is not None and raw_max.strip():
+            try:
+                parsed_max = int(raw_max.strip())
+                if parsed_max > 0:
+                    max_events = parsed_max
+            except ValueError:
+                max_events = None
+
         loop = asyncio.get_running_loop()
         q, missed = store.subscribe(loop, last_event_id=last_id)
 
         async def event_stream():
+            emitted = 0
             try:
                 if last_id is None:
                     snap_id = store.allocate_event_id()
@@ -131,11 +143,20 @@ def create_app(
                         "snapshot",
                         {"matches": store.get_matches_snapshot(), "status": store.get_status()},
                     )
+                    emitted += 1
+                    if once or (max_events is not None and emitted >= max_events):
+                        return
                 else:
                     for eid, ename, edata in missed:
                         yield _format_sse(eid, ename, edata)
+                        emitted += 1
+                        if max_events is not None and emitted >= max_events:
+                            return
                     hb_id = store.allocate_event_id()
                     yield _format_sse(hb_id, "status", store.get_status())
+                    emitted += 1
+                    if once or (max_events is not None and emitted >= max_events):
+                        return
 
                 while True:
                     if await request.is_disconnected():
@@ -146,6 +167,9 @@ def create_app(
                     except asyncio.TimeoutError:
                         hb_id = store.allocate_event_id()
                         yield _format_sse(hb_id, "status", store.get_status())
+                    emitted += 1
+                    if max_events is not None and emitted >= max_events:
+                        break
             except asyncio.CancelledError:
                 return
             finally:

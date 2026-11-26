@@ -504,21 +504,17 @@ class SessionRouter:
     def _on_kcp_message(self, msg: ReassembledKcpMessage) -> None:
         sess = self._get_or_create(msg.ep, msg.ts)
         conv_hex = msg.conv.hex()
-        sess.convs.add(conv_hex)
-        sess.last_ts = max(sess.last_ts, msg.ts)
-
         data = msg.payload
         if len(data) < 3 or data[0] != 0x70:
+            sess.convs.add(conv_hex)
+            sess.last_ts = max(sess.last_ts, msg.ts)
             return
 
         if msg.direction == "out":
+            sess.convs.add(conv_hex)
+            sess.last_ts = max(sess.last_ts, msg.ts)
             self._handle_outbound_kcp(sess, data)
             return
-
-        digest = hashlib.sha256(data).digest()
-        if digest in sess.kcp_seen_digests:
-            return
-        sess.kcp_seen_digests.add(digest)
 
         mid = 0
         if data[1] == 0x00:
@@ -531,8 +527,18 @@ class SessionRouter:
             m = _PLAY_RE.search(data)
             if m:
                 battle_id = m.group(1).decode("ascii")
-                self._bind_battle_id(sess, battle_id, msg.ts, from_login=True)
+                sess = self._bind_battle_id(sess, battle_id, msg.ts, from_login=True)
+            sess.convs.add(conv_hex)
+            sess.last_ts = max(sess.last_ts, msg.ts)
             return
+
+        sess.convs.add(conv_hex)
+        sess.last_ts = max(sess.last_ts, msg.ts)
+
+        digest = hashlib.sha256(data).digest()
+        if digest in sess.kcp_seen_digests:
+            return
+        sess.kcp_seen_digests.add(digest)
 
         if mid == 1202:
             self._handle_roster_1202(sess, data)
