@@ -749,6 +749,45 @@ Found while trying to capture in-match chat: during a live **custom match agains
 
 **Unrelated but worth writing down.** The phone has been on a university enterprise Wi-Fi while these checks ran. Campus networks commonly filter non-standard UDP, so if a future match connects poorly or not at all, the campus link is the first suspect, not the phone.
 
+### 5.16 In-match chat is plaintext on the match UDP stream (measured 2026-11-26)
+
+Raised as a separate question — can enemy team chat be read? — and answered in two parts.
+
+**The transport answer first: chat is not encrypted.** Captured at full snaplen during a live solo classic match (`148.153.101.29:5003`, a new port and a new CDS machine), while the user sent `team` to team chat and `all` to all-chat.
+
+Outbound message, 43 bytes:
+
+```
+... 70 00 02 41 04 74 65 61 6d 80 ...
+         ^^^^^ ^^^^^ ^^^^^^^^^^^^^^
+         field 0x7002 (chat)   0x41 len=4 "team"
+```
+
+The match server **sends the message back** to the same client, in a 182-byte record containing sender fields, a message id and the text:
+
+```
+... 70 00 13 01 06 43 5f  70 00 02 41 04 "team"
+... 05 01 09 01 4a 22 "2026112611258049CAAD8581A81446CADK)609902284293776795-30028189-1795663378740"
+... 70 00 22 01 0d 43 02 a8 31 80 ...
+```
+
+Packet counts per direction, both channels, both links:
+
+| | outbound to server | inbound from server |
+|---|---|---|
+| team chat | 6 | 4 |
+| all chat | 6 | 4 |
+
+(Counts double because Network Boost duplicates over both links.)
+
+**What this establishes.** Chat is a plaintext TLV on the existing match UDP socket — tag `0x7002` for the chat container, `0x41 <len> <text>` for the message body. No per-message encryption, no separate channel. The server relays the sender's own message back, and the relayed record carries a message id and several small numeric fields.
+
+**What it does not establish.** Whether the server sends **enemy team-only** messages to a client on the other team. Every message observed here was addressed to the sender's own client. Standard implementation is server-side addressing: team chat goes to the five team sockets. If that holds, enemy team chat is never transmitted to the user and cannot be read — the same argument as §6.1, a message not sent cannot be intercepted.
+
+**The definitive test is cheap and needs one friend.** Custom 5v5 room, friend on the **opposite** team, friend types a unique string in **team** chat. Capture on the user's phone. If the text appears in the capture, the server broadcasts chat to all ten clients and enemy team chat is readable; if it does not, the relay is addressed per team and the answer is no. The parser for `0x7002`/`0x41` is already written, so the check is a single command.
+
+**Practical note.** Enemy **all-chat** is relayed to every client by definition, so it is readable on the wire — but it is also already visible in the game UI, so this adds no informational advantage. The only real question is the team channel.
+
 ---
 
 ## 6. Endpoint identification and classification
