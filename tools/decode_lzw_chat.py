@@ -225,5 +225,10 @@ def analyze(pcap_path, match_port):
 
 if __name__ == "__main__":
     base = pathlib.Path(r"C:\Users\child\PROJECTS\FIxLag\captures")
-    analyze(base / "draft_CHAT4.pcap", 5007)
-    analyze(base / "draft_DRAFT.pcap", 5007)
+    if len(sys.argv) >= 3:
+        analyze(pathlib.Path(sys.argv[1]), int(sys.argv[2]))
+    elif len(sys.argv) == 2:
+        # No port given: try each port seen in the capture directory default set.
+        analyze(pathlib.Path(sys.argv[1]), 5007)
+    else:
+        analyze(base / "draft_CHAT4.pcap", 5007)
