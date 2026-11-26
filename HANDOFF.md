@@ -12,7 +12,7 @@ Finding: ping variance is server-side (city/provider/IP); client-side tools only
 - Test suite (`pytest -v tests/test_chat_viewer.py`): 16 tests passing.
 
 ## Active tasks
-_(none)_
+- Build Server & Live Packet Mapper: [handoffs/build-lag-mapper.md](handoffs/build-lag-mapper.md)
 
 ## Where to look
 - Research & root/ADB setup: [docs/handoff.md](docs/handoff.md)
