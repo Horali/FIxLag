@@ -244,11 +244,20 @@ class MatchStore:
             status = self.get_status()
         self.publish("source_reset", {"status": status})
 
-    def set_capture_state(self, *, alive: bool, source_mode: str | None = None, error: str | None = None) -> None:
+    def set_capture_state(
+        self,
+        *,
+        alive: bool,
+        source_mode: str | None = None,
+        source_detail: str | None = None,
+        error: str | None = None,
+    ) -> None:
         with self._lock:
             self._capture_alive = alive
             if source_mode is not None:
                 self._source_mode = source_mode
+            if source_detail is not None:
+                self._source_detail = source_detail
             if error is not None:
                 self._last_error = error
             status = self.get_status()
@@ -377,6 +386,7 @@ class MatchStore:
                 "skipped_truncated": self._skipped_truncated,
                 "active_match_id": active.match_id if active else None,
                 "active_battle_id": active.battle_id if active else None,
+                "active_server": f"{active.server_ip}:{active.server_port}" if active else None,
                 "phase": active.phase if active else "IDLE",
                 "fsm_state": fsm_state,
                 "next_tick": active.battle.next_tick if active else None,

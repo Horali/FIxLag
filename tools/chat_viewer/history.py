@@ -1,0 +1,368 @@
+"""Persistent Past Games archive and cached PCAP indexer for MLBB chat viewer."""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+from .pcap_reader import IncrementalPcapReader, InvalidPcapMagicError
+from .session import MatchStore, SessionRouter
+from .templates import TemplateResolver
+
+DEFAULT_HISTORY_DIR = Path(__file__).resolve().parents[2] / "data" / "chat_history"
+MIN_PCAP_BYTES = 100
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp.{os.getpid()}.{threading.get_ident()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _read_json_safe(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _best_preview(events: list[dict[str, Any]]) -> str:
+    if not events:
+        return ""
+
+    def _fmt(ev: dict[str, Any]) -> str:
+        sender = str(ev.get("sender_name") or "Player")
+        text = str(ev.get("display_text") or ev.get("raw_text") or "")
+        return f"{sender}: {text}" if text else sender
+
+    for ev in events:
+        if ev.get("side") == "ENEMY" and ev.get("channel") in (2, 4) and not ev.get("is_template"):
+            return _fmt(ev)
+    for ev in events:
+        if ev.get("side") == "ENEMY" and ev.get("channel") in (2, 4):
+            return _fmt(ev)
+    for ev in events:
+        if not ev.get("is_template"):
+            return _fmt(ev)
+    return _fmt(events[0])
+
+
+def _summarize_game(record: dict[str, Any]) -> dict[str, Any]:
+    events = record.get("events") or []
+    gaps = record.get("gaps") or []
+    players = record.get("players") or []
+    local_uid = record.get("local_uid")
+    local_camp = record.get("local_camp")
+    ally_camp = local_camp if local_camp in (1, 2) else 1
+    enemy_camp = 2 if ally_camp == 1 else 1
+
+    ally_names: list[str] = []
+    enemy_names: list[str] = []
+    for p in players:
+        name = str(p.get("name") or f"uid:{p.get('uid')}")
+        camp = p.get("camp")
+        if camp == ally_camp:
+            if local_uid is not None and p.get("uid") == local_uid:
+                ally_names.insert(0, name)
+            else:
+                ally_names.append(name)
+        elif camp == enemy_camp:
+            enemy_names.append(name)
+
+    first_ts = float(record.get("first_ts") or 0.0)
+    last_ts = float(record.get("last_ts") or first_ts)
+    typed_count = sum(1 for ev in events if not ev.get("is_template"))
+    quickchat_count = len(events) - typed_count
+    enemy_team_count = sum(
+        1 for ev in events if ev.get("side") == "ENEMY" and ev.get("channel") in (2, 4)
+    )
+
+    return {
+        "game_id": record["game_id"],
+        "origin": record["origin"],
+        "source_name": record["source_name"],
+        "battle_id": record.get("battle_id"),
+        "server_ip": record.get("server_ip"),
+        "server_port": record.get("server_port"),
+        "phase": record.get("phase") or "IDLE",
+        "fsm_state": record.get("fsm_state") or "IDLE",
+        "started_at": first_ts,
+        "ended_at": last_ts,
+        "duration_s": max(0.0, round(last_ts - first_ts, 1)),
+        "local_uid": local_uid,
+        "local_camp": local_camp,
+        "ally_players": ally_names,
+        "enemy_players": enemy_names,
+        "typed_count": typed_count,
+        "quickchat_count": quickchat_count,
+        "enemy_team_count": enemy_team_count,
+        "total_events": len(events),
+        "has_gaps": bool(gaps),
+        "preview": _best_preview(events),
+    }
+
+
+def _decode_pcap_to_records(path: Path, templates: TemplateResolver) -> list[dict[str, Any]]:
+    store = MatchStore()
+    router = SessionRouter(store=store, templates=templates)
+    reader = IncrementalPcapReader()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(131072)
+            if not chunk:
+                break
+            for pkt in reader.feed(chunk):
+                router.on_packet(pkt, skipped_truncated=reader.skipped_truncated)
+
+    records: list[dict[str, Any]] = []
+    for m in store.get_matches_snapshot():
+        rec = dict(m)
+        rec["game_id"] = f"pcap:{path.name}:{m['match_id']}"
+        rec["origin"] = "pcap"
+        rec["source_name"] = path.name
+        records.append(rec)
+    return records
+
+
+class MatchHistoryStore:
+    """Thread-safe persistent archive of live games and cached PCAP captures."""
+
+    def __init__(
+        self,
+        captures_dir: Path,
+        history_dir: Path | None = None,
+        templates: TemplateResolver | None = None,
+    ) -> None:
+        self.captures_dir = Path(captures_dir)
+        self.history_dir = Path(history_dir) if history_dir is not None else DEFAULT_HISTORY_DIR
+        self.templates = templates if templates is not None else TemplateResolver()
+
+        self._live_path = self.history_dir / "live_games.json"
+        self._cache_path = self.history_dir / "pcap_cache.json"
+        self._lock = threading.RLock()
+        self._io_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._scan_thread: threading.Thread | None = None
+
+        self._live_games: dict[str, dict[str, Any]] = {}
+        self._pcap_cache: dict[str, dict[str, Any]] = {}
+        self._scan_state: dict[str, Any] = {
+            "scanning": False,
+            "done": 0,
+            "total": 0,
+            "current_file": "",
+        }
+        self._load_disk()
+
+    def _load_disk(self) -> None:
+        live_raw = _read_json_safe(self._live_path)
+        games_map = live_raw.get("games") if isinstance(live_raw.get("games"), dict) else live_raw
+        if isinstance(games_map, dict):
+            for gid, rec in games_map.items():
+                if isinstance(gid, str) and gid.startswith("live:") and isinstance(rec, dict):
+                    rec.setdefault("game_id", gid)
+                    rec.setdefault("origin", "live")
+                    rec.setdefault("source_name", "Live capture")
+                    self._live_games[gid] = rec
+
+        cache_raw = _read_json_safe(self._cache_path)
+        files_map = cache_raw.get("files") if isinstance(cache_raw.get("files"), dict) else cache_raw
+        if isinstance(files_map, dict):
+            for fname, entry in files_map.items():
+                if (
+                    isinstance(fname, str)
+                    and isinstance(entry, dict)
+                    and isinstance(entry.get("games"), list)
+                ):
+                    self._pcap_cache[fname] = entry
+
+    def _persist_live(self) -> None:
+        with self._lock:
+            snap = {"version": 1, "games": dict(self._live_games)}
+        with self._io_lock:
+            _atomic_write_json(self._live_path, snap)
+
+    def _persist_pcap_cache(self) -> None:
+        with self._lock:
+            snap = {"version": 1, "files": dict(self._pcap_cache)}
+        with self._io_lock:
+            _atomic_write_json(self._cache_path, snap)
+
+    def save_live_matches(self, matches: list[dict[str, Any]]) -> None:
+        """Persist any live/followed match containing chat events or gap warnings."""
+        changed = False
+        with self._lock:
+            for m in matches:
+                if not m.get("events") and not m.get("gaps"):
+                    continue
+                bid = m.get("battle_id")
+                if bid:
+                    gid = f"live:{bid}"
+                else:
+                    ts_key = int(float(m.get("first_ts") or time.time()))
+                    gid = f"live:{ts_key}:{m.get('server_ip') or '0.0.0.0'}:{m.get('server_port') or 0}"
+                rec = dict(m)
+                rec["game_id"] = gid
+                rec["origin"] = "live"
+                rec["source_name"] = "Live capture"
+                self._live_games[gid] = rec
+                changed = True
+        if changed:
+            self._persist_live()
+
+    def delete_live_game(self, game_id: str) -> bool:
+        """Delete a saved live game by `live:...` id; refuse `pcap:...` items."""
+        if not game_id.startswith("live:"):
+            raise ValueError("Only saved live games can be deleted from history")
+        with self._lock:
+            removed = self._live_games.pop(game_id, None) is not None
+        if removed:
+            self._persist_live()
+        return removed
+
+    def stop_scan(self, timeout: float = 2.0) -> None:
+        """Stop background PCAP indexing cleanly on shutdown."""
+        self._stop_event.set()
+        t = self._scan_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=timeout)
+
+    def start_background_scan(self, force: bool = False) -> dict[str, Any]:
+        """Start background PCAP indexing if not already running."""
+        with self._lock:
+            if self._scan_thread is not None and self._scan_thread.is_alive():
+                return dict(self._scan_state)
+            self._stop_event.clear()
+            t = threading.Thread(
+                target=self._scan_worker,
+                args=(force,),
+                name="chat-viewer-history-scan",
+                daemon=True,
+            )
+            self._scan_thread = t
+            self._scan_state = {"scanning": True, "done": 0, "total": 0, "current_file": ""}
+            t.start()
+            return dict(self._scan_state)
+
+    def _scan_worker(self, force: bool) -> None:
+        try:
+            if not self.captures_dir.is_dir():
+                return
+            files = sorted(
+                (p for p in self.captures_dir.glob("*.pcap") if p.is_file() and p.stat().st_size >= MIN_PCAP_BYTES),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            with self._lock:
+                self._scan_state = {
+                    "scanning": True,
+                    "done": 0,
+                    "total": len(files),
+                    "current_file": "",
+                }
+
+            for idx, p in enumerate(files, 1):
+                if self._stop_event.is_set():
+                    break
+                st = p.stat()
+                sig = (st.st_size, st.st_mtime_ns)
+                with self._lock:
+                    cached = self._pcap_cache.get(p.name)
+                    self._scan_state["current_file"] = p.name
+                if (
+                    not force
+                    and cached is not None
+                    and cached.get("size") == sig[0]
+                    and cached.get("mtime_ns") == sig[1]
+                ):
+                    with self._lock:
+                        self._scan_state["done"] = idx
+                    continue
+
+                try:
+                    records = _decode_pcap_to_records(p, self.templates)
+                except (OSError, InvalidPcapMagicError):
+                    records = []
+
+                entry = {"size": sig[0], "mtime_ns": sig[1], "games": records}
+                with self._lock:
+                    self._pcap_cache[p.name] = entry
+                    self._scan_state["done"] = idx
+                self._persist_pcap_cache()
+        finally:
+            with self._lock:
+                self._scan_state["scanning"] = False
+                self._scan_state["current_file"] = ""
+
+    def list_games(self, *, include_empty: bool = False) -> dict[str, Any]:
+        """Return newest-first game summaries across live history and cached PCAPs."""
+        all_records: list[dict[str, Any]] = []
+        with self._lock:
+            all_records.extend(self._live_games.values())
+            for entry in self._pcap_cache.values():
+                all_records.extend(entry.get("games") or [])
+            scan = dict(self._scan_state)
+
+        summaries = [_summarize_game(r) for r in all_records]
+        summaries.sort(key=lambda g: (g["started_at"], g["game_id"]), reverse=True)
+        total_all = len(summaries)
+        with_chat = [g for g in summaries if g["total_events"] > 0]
+        visible = summaries if include_empty else with_chat
+        return {
+            "games": visible,
+            "total_with_chat": len(with_chat),
+            "total_all": total_all,
+            "scan": scan,
+        }
+
+    def get_game(self, game_id: str) -> dict[str, Any] | None:
+        """Return full game record (summary + players + events + gaps) by id."""
+        with self._lock:
+            if game_id in self._live_games:
+                rec = dict(self._live_games[game_id])
+                rec["summary"] = _summarize_game(rec)
+                return rec
+            for entry in self._pcap_cache.values():
+                for rec in entry.get("games") or []:
+                    if rec.get("game_id") == game_id:
+                        out = dict(rec)
+                        out["summary"] = _summarize_game(out)
+                        return out
+
+        # Lazy single-file decode if requested before background scan finishes.
+        if game_id.startswith("pcap:"):
+            parts = game_id.split(":", 2)
+            if len(parts) == 3:
+                fname = parts[1]
+                target = (self.captures_dir / fname).resolve()
+                try:
+                    target.relative_to(self.captures_dir.resolve())
+                except ValueError:
+                    return None
+                if target.is_file() and target.stat().st_size >= MIN_PCAP_BYTES:
+                    st = target.stat()
+                    try:
+                        records = _decode_pcap_to_records(target, self.templates)
+                    except (OSError, InvalidPcapMagicError):
+                        return None
+                    with self._lock:
+                        self._pcap_cache[target.name] = {
+                            "size": st.st_size,
+                            "mtime_ns": st.st_mtime_ns,
+                            "games": records,
+                        }
+                    self._persist_pcap_cache()
+                    for rec in records:
+                        if rec.get("game_id") == game_id:
+                            out = dict(rec)
+                            out["summary"] = _summarize_game(out)
+                            return out
+        return None

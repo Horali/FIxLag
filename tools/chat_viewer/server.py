@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from .history import MatchHistoryStore
 from .ingest import IngestController, list_adb_devices
 from .session import MatchStore, SessionRouter
 from .templates import TemplateResolver
@@ -39,16 +40,25 @@ def create_app(
     *,
     captures_dir: Path | None = None,
     templates_path: Path | None = None,
+    history_dir: Path | None = None,
     initial_source: dict[str, Any] | None = None,
     heartbeat_interval: float = 1.0,
     adb_path: Path | str | None = None,
+    auto_scan_history: bool = True,
 ) -> Starlette:
     """Build the Starlette ASGI app exposing `/`, `/events`, and JSON control/status APIs."""
     cap_dir = Path(captures_dir) if captures_dir is not None else DEFAULT_CAPTURES_DIR
     templates = TemplateResolver(templates_path)
     store = MatchStore()
     router = SessionRouter(store=store, templates=templates)
-    ingest = IngestController(router=router, store=store, captures_dir=cap_dir, adb_path=adb_path)
+    history = MatchHistoryStore(captures_dir=cap_dir, history_dir=history_dir, templates=templates)
+    ingest = IngestController(
+        router=router,
+        store=store,
+        captures_dir=cap_dir,
+        adb_path=adb_path,
+        on_live_snapshot=history.save_live_matches,
+    )
 
     async def index(_request: Request) -> HTMLResponse:
         return HTMLResponse(INDEX_HTML)
@@ -87,7 +97,7 @@ def create_app(
         try:
             if mode == "stop":
                 ingest.stop()
-                store.set_capture_state(alive=False, source_mode="IDLE", error=None)
+                store.set_capture_state(alive=False, source_mode="IDLE", source_detail="", error=None)
                 return JSONResponse({"ok": True, "status": store.get_status()})
 
             if mode == "pcap":
@@ -182,8 +192,42 @@ def create_app(
         }
         return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
+    async def api_history_list(request: Request) -> JSONResponse:
+        include_empty = request.query_params.get("include_empty", "").strip().lower() in ("1", "true", "yes")
+        return JSONResponse(history.list_games(include_empty=include_empty))
+
+    async def api_history_scan(request: Request) -> JSONResponse:
+        force = False
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                force = bool(body.get("force", False))
+        except ValueError:
+            force = False
+        scan_state = history.start_background_scan(force=force)
+        return JSONResponse({"ok": True, "scan": scan_state})
+
+    async def api_history_game(request: Request) -> JSONResponse:
+        game_id = request.path_params.get("game_id", "")
+        game = history.get_game(game_id)
+        if game is None:
+            return JSONResponse({"error": "Game not found"}, status_code=404)
+        return JSONResponse(game)
+
+    async def api_history_delete(request: Request) -> JSONResponse:
+        game_id = request.path_params.get("game_id", "")
+        try:
+            deleted = history.delete_live_game(game_id)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not deleted:
+            return JSONResponse({"error": "Game not found"}, status_code=404)
+        return JSONResponse({"ok": True})
+
     @asynccontextmanager
     async def lifespan(_app: Starlette):
+        if auto_scan_history:
+            history.start_background_scan(force=False)
         if initial_source:
             mode = str(initial_source.get("mode") or "").lower()
             if mode == "pcap" and initial_source.get("path"):
@@ -194,6 +238,7 @@ def create_app(
             yield
         finally:
             ingest.stop()
+            history.stop_scan()
 
     app = Starlette(
         debug=False,
@@ -204,12 +249,17 @@ def create_app(
             Route("/api/pcaps", api_pcaps, methods=["GET"]),
             Route("/api/devices", api_devices, methods=["GET"]),
             Route("/api/source", api_source, methods=["POST"]),
+            Route("/api/history", api_history_list, methods=["GET"]),
+            Route("/api/history/scan", api_history_scan, methods=["POST"]),
+            Route("/api/history/{game_id:path}", api_history_game, methods=["GET"]),
+            Route("/api/history/{game_id:path}", api_history_delete, methods=["DELETE"]),
         ],
         lifespan=lifespan,
     )
     app.state.store = store
     app.state.router = router
     app.state.ingest = ingest
+    app.state.history = history
     return app
 
 
@@ -219,15 +269,19 @@ def run_server(
     port: int = 8765,
     captures_dir: Path | None = None,
     templates_path: Path | None = None,
+    history_dir: Path | None = None,
     initial_source: dict[str, Any] | None = None,
     adb_path: Path | str | None = None,
+    auto_scan_history: bool = True,
 ) -> None:
     """Run Uvicorn bound strictly to `127.0.0.1`."""
     safe_host = validate_loopback_host(host)
     app = create_app(
         captures_dir=captures_dir,
         templates_path=templates_path,
+        history_dir=history_dir,
         initial_source=initial_source,
         adb_path=adb_path,
+        auto_scan_history=auto_scan_history,
     )
     uvicorn.run(app, host=safe_host, port=port, log_level="info")
