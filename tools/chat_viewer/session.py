@@ -54,15 +54,60 @@ _CHANNEL_LABELS = {
     22: "loading",
 }
 
+_PVP_TYPE_LABELS = {
+    1: "Classic",
+    2: "Ranked",
+    3: "3v3",
+    4: "Brawl",
+    5: "VS AI",
+    6: "Custom",
+    7: "MCL",
+    8: "Draft Pick",
+    9: "1v1",
+    10: "Custom Tournament",
+    13: "Mirror",
+    21: "Ranked",
+    22: "VS AI",
+    23: "VS AI",
+    30: "Magic Chess",
+    31: "Magic Chess",
+    32: "Magic Chess",
+    33: "Magic Chess",
+    40: "10-Ban Draft",
+}
+
 
 def channel_label(channel: int) -> str:
     """Return human-readable channel label for an MLBB chat channel id."""
     return _CHANNEL_LABELS.get(channel, f"ch{channel}")
 
 
+def format_mode_label(pvp_type: int | None, map_id: int | None) -> str:
+    """Return human-readable mode label for parsed SDP `iPVPType` and `uiMapID`."""
+    if pvp_type == 6 and map_id == 8:
+        return "Custom Draft"
+    if pvp_type in _PVP_TYPE_LABELS:
+        return _PVP_TYPE_LABELS[pvp_type]
+    if pvp_type is not None and pvp_type > 0:
+        return f"Mode {pvp_type}"
+    return ""
+
+
+def _format_party_label(party_size: int | None, pvp_type: int | None) -> str:
+    if pvp_type == 6 or party_size is None or party_size <= 0:
+        return ""
+    return {
+        1: "Solo",
+        2: "Duo",
+        3: "Trio",
+        4: "4-stack",
+        5: "5-stack",
+    }.get(party_size, f"{party_size}-stack")
+
+
 @dataclass(slots=True)
 class PlayerInfo:
-    """Known player metadata from roster (`mid=1202`/`1203`), `ev=0x34`/`0x36`/`0x45`, or `msg_uid`."""
+    """Known player metadata from roster (`mid=1230`/`1202`/`1203`), `ev=0x34`/`0x36`/`0x45`, or `msg_uid`."""
 
     uid: int
     name: str = ""
@@ -70,6 +115,10 @@ class PlayerInfo:
     seat: int | None = None
     hero_id: int | None = None
     hero_name: str = ""
+    is_bot: bool = False
+    country: str = ""
+    zone_id: int | None = None
+    room_id: int | None = None
 
     @property
     def slot(self) -> int | None:
@@ -160,6 +209,9 @@ class MatchSession:
     last_ts: float
     battle_id: str | None = None
     phase: str = "IDLE"  # "IDLE" | "DRAFT" | "LOADING" | "BATTLE"
+    pvp_type: int | None = None
+    map_id: int | None = None
+    mode_label: str = ""
     battle: BattleTickProcessor = field(default_factory=BattleTickProcessor)
     convs: set[str] = field(default_factory=set)
     battle_convs: set[str] = field(default_factory=set)
@@ -192,12 +244,34 @@ class MatchSession:
         return self.ep[1]
 
     def summary_dict(self) -> dict[str, Any]:
+        camp_room_counts: dict[tuple[int, int], int] = {}
+        country_counts: dict[str, int] = {}
+        for p in self.players_by_uid.values():
+            if p.camp in (1, 2) and p.room_id is not None and p.room_id > 0:
+                key = (p.camp, p.room_id)
+                camp_room_counts[key] = camp_room_counts.get(key, 0) + 1
+            if p.country:
+                country_counts[p.country] = country_counts.get(p.country, 0) + 1
+
+        local_party_size: int | None = None
+        if self.local_uid is not None and self.local_uid in self.players_by_uid:
+            lp = self.players_by_uid[self.local_uid]
+            if lp.camp in (1, 2) and lp.room_id is not None and lp.room_id > 0:
+                local_party_size = camp_room_counts.get((lp.camp, lp.room_id))
+        party_label = _format_party_label(local_party_size, self.pvp_type)
+
         return {
             "match_id": self.match_id,
             "server_ip": self.ep[0],
             "server_port": self.ep[1],
             "battle_id": self.battle_id,
             "phase": self.phase,
+            "pvp_type": self.pvp_type,
+            "map_id": self.map_id,
+            "mode_label": self.mode_label,
+            "local_party_size": local_party_size,
+            "party_label": party_label,
+            "country_counts": dict(sorted(country_counts.items())),
             "fsm_state": self.battle.fsm_state,
             "battle_mode": self.battle.mode,
             "next_tick": self.battle.next_tick,
@@ -222,6 +296,15 @@ class MatchSession:
                     "slot": p.slot,
                     "hero_id": p.hero_id,
                     "hero_name": p.hero_name,
+                    "is_bot": p.is_bot,
+                    "country": p.country,
+                    "zone_id": p.zone_id,
+                    "room_id": p.room_id,
+                    "party_size": (
+                        camp_room_counts.get((p.camp, p.room_id))
+                        if (p.camp in (1, 2) and p.room_id is not None and p.room_id > 0)
+                        else None
+                    ),
                 }
                 for p in sorted(self.players_by_uid.values(), key=lambda x: (x.camp or 9, x.seat or 9, x.uid))
             ],
@@ -578,6 +661,14 @@ class SessionRouter:
             return
         sess.kcp_seen_digests.add(digest)
 
+        if mid == 1242:
+            self._handle_pre_roster_1242(sess, data)
+            return
+
+        if mid == 1230:
+            self._handle_roster_1230(sess, data)
+            return
+
         if mid == 1202:
             self._handle_roster_1202(sess, data)
             return
@@ -609,8 +700,28 @@ class SessionRouter:
             sess.local_uid = uid
             self._refresh_local_attribution(sess)
 
-    @staticmethod
-    def _parse_roster_items(data: bytes) -> list[Any] | None:
+    @classmethod
+    def _parse_roster_root(cls, data: bytes) -> tuple[dict[Any, Any], list[Any]] | None:
+        try:
+            outer, _ = parse_mlbb_struct(data, 1)
+        except ValueError:
+            outer = {}
+        b6 = outer.get(("b", 6)) if isinstance(outer, dict) else None
+        if isinstance(b6, bytes) and b6[:1] == b"\x70":
+            try:
+                root, _ = parse_mlbb_struct(b6, 1)
+            except ValueError:
+                root = {}
+            if isinstance(root, dict):
+                players = root.get(("l", 0))
+                if isinstance(players, list):
+                    return root, players
+                s1 = root.get(("s", 1))
+                if isinstance(s1, dict):
+                    s1_players = s1.get(("l", 0))
+                    if isinstance(s1_players, list):
+                        return s1, s1_players
+
         idx = data.find(b"\x70\x50")
         if idx < 0:
             return None
@@ -618,11 +729,47 @@ class SessionRouter:
             root, _ = parse_mlbb_struct(data, idx + 1)
         except ValueError:
             return None
-        players = root.get(("l", 0))
-        return players if isinstance(players, list) else None
+        if isinstance(root, dict):
+            players = root.get(("l", 0))
+            if isinstance(players, list):
+                return root, players
+        return None
+
+    @classmethod
+    def _parse_roster_items(cls, data: bytes) -> list[Any] | None:
+        parsed = cls._parse_roster_root(data)
+        return parsed[1] if parsed is not None else None
 
     @staticmethod
-    def _apply_roster_player(sess: MatchSession, item: dict[Any, Any]) -> bool:
+    def _merge_player_meta(
+        player: PlayerInfo,
+        *,
+        name: str,
+        is_bot: bool,
+        country: str,
+        zone_id: int | None,
+        room_id: int | None,
+    ) -> bool:
+        changed = False
+        if name and not player.name:
+            player.name = name
+            changed = True
+        if is_bot and not player.is_bot:
+            player.is_bot = True
+            changed = True
+        if country and not player.country:
+            player.country = country
+            changed = True
+        if zone_id is not None and player.zone_id is None:
+            player.zone_id = zone_id
+            changed = True
+        if room_id is not None and player.room_id is None:
+            player.room_id = room_id
+            changed = True
+        return changed
+
+    @classmethod
+    def _apply_roster_player(cls, sess: MatchSession, item: dict[Any, Any]) -> bool:
         uid = item.get(("v", 0))
         if not isinstance(uid, int):
             return False
@@ -632,24 +779,64 @@ class SessionRouter:
         camp_val = camp if isinstance(camp, int) and camp in (1, 2) else None
         seat_val = seat if isinstance(seat, int) else 0
         name = name_raw.decode("utf-8", "replace") if isinstance(name_raw, bytes) else ""
+
+        is_bot = bool(item.get(("v", 4)))
+        zone_raw = item.get(("v", 9))
+        zone_id = zone_raw if isinstance(zone_raw, int) and zone_raw > 0 else None
+        room_raw = item.get(("v", 22))
+        room_id = room_raw if isinstance(room_raw, int) and room_raw > 0 else None
+        cc_raw = item.get(("b", 26))
+        country = ""
+        if isinstance(cc_raw, bytes):
+            cc = cc_raw.decode("utf-8", "replace").strip().upper()
+            if 1 <= len(cc) <= 4 and cc.isalpha():
+                country = cc
+
         existing = sess.players_by_uid.get(uid)
         changed = False
         if sess.attribution_frozen or uid in sess.swapped_uids:
             if existing is None:
-                sess.players_by_uid[uid] = PlayerInfo(uid=uid, name=name)
+                sess.players_by_uid[uid] = PlayerInfo(
+                    uid=uid,
+                    name=name,
+                    is_bot=is_bot,
+                    country=country,
+                    zone_id=zone_id,
+                    room_id=room_id,
+                )
                 changed = True
-            elif name and not existing.name:
-                existing.name = name
-                changed = True
+            else:
+                changed = cls._merge_player_meta(
+                    existing,
+                    name=name,
+                    is_bot=is_bot,
+                    country=country,
+                    zone_id=zone_id,
+                    room_id=room_id,
+                )
             return changed
 
         if existing is None:
-            sess.players_by_uid[uid] = PlayerInfo(uid=uid, name=name, camp=camp_val, seat=seat_val)
+            sess.players_by_uid[uid] = PlayerInfo(
+                uid=uid,
+                name=name,
+                camp=camp_val,
+                seat=seat_val,
+                is_bot=is_bot,
+                country=country,
+                zone_id=zone_id,
+                room_id=room_id,
+            )
             changed = True
         else:
-            if name and not existing.name:
-                existing.name = name
-                changed = True
+            changed = cls._merge_player_meta(
+                existing,
+                name=name,
+                is_bot=is_bot,
+                country=country,
+                zone_id=zone_id,
+                room_id=room_id,
+            )
             if camp_val is not None and existing.camp is None:
                 existing.camp = camp_val
                 changed = True
@@ -662,6 +849,21 @@ class SessionRouter:
                 sess.slot_to_uid[slot] = uid
                 changed = True
             sess.slot_to_camp[slot] = camp_val
+        return changed
+
+    @staticmethod
+    def _apply_mode(sess: MatchSession, pvp_type: Any, map_id: Any) -> bool:
+        changed = False
+        if isinstance(pvp_type, int) and pvp_type > 0 and sess.pvp_type is None:
+            sess.pvp_type = pvp_type
+            changed = True
+        if isinstance(map_id, int) and map_id > 0 and sess.map_id is None:
+            sess.map_id = map_id
+            changed = True
+        new_label = format_mode_label(sess.pvp_type, sess.map_id)
+        if new_label and new_label != sess.mode_label:
+            sess.mode_label = new_label
+            changed = True
         return changed
 
     def _set_player_hero(self, sess: MatchSession, uid: int, hero_id: int) -> tuple[bool, bool]:
@@ -724,17 +926,60 @@ class SessionRouter:
             if p_chg or ev_chg:
                 self._publish_hero_update(sess, include_events=ev_chg)
 
-    def _handle_roster_1202(self, sess: MatchSession, data: bytes) -> None:
-        players = self._parse_roster_items(data)
-        if players is None:
+    def _handle_pre_roster_1242(self, sess: MatchSession, data: bytes) -> None:
+        try:
+            outer, _ = parse_mlbb_struct(data, 1)
+        except ValueError:
             return
-        # NOTE: mid=1202 player list is sorted by uid, not by seat; always read field ('v', 2).
+        b6 = outer.get(("b", 6)) if isinstance(outer, dict) else None
+        if not isinstance(b6, bytes) or b6[:1] != b"\x70":
+            return
+        try:
+            root, _ = parse_mlbb_struct(b6, 1)
+        except ValueError:
+            return
+        if not isinstance(root, dict):
+            return
+
         changed = False
+        belong_uid = root.get(("v", 1))
+        if isinstance(belong_uid, int) and belong_uid > 0 and sess.local_uid is None:
+            sess.local_uid = belong_uid
+            changed = True
+        if self._apply_mode(sess, root.get(("v", 3)), root.get(("v", 4))):
+            changed = True
+        if sess.phase == "IDLE":
+            sess.phase = "DRAFT"
+            changed = True
+        if changed:
+            if sess.players_by_uid:
+                self._refresh_local_attribution(sess)
+            else:
+                self.store.publish("match_update", sess.summary_dict())
+
+    def _apply_roster_message(self, sess: MatchSession, data: bytes, *, enter_draft: bool) -> None:
+        parsed = self._parse_roster_root(data)
+        if parsed is None:
+            return
+        root, players = parsed
+        changed = False
+        if self._apply_mode(sess, root.get(("v", 1)), root.get(("v", 2))):
+            changed = True
+        if enter_draft and sess.phase == "IDLE":
+            sess.phase = "DRAFT"
+            changed = True
+        # NOTE: roster player list is sorted by uid, not by seat; always read field ('v', 2).
         for item in players:
             if isinstance(item, dict) and self._apply_roster_player(sess, item):
                 changed = True
         if changed:
             self._refresh_local_attribution(sess)
+
+    def _handle_roster_1230(self, sess: MatchSession, data: bytes) -> None:
+        self._apply_roster_message(sess, data, enter_draft=True)
+
+    def _handle_roster_1202(self, sess: MatchSession, data: bytes) -> None:
+        self._apply_roster_message(sess, data, enter_draft=False)
 
     def _handle_battle_roster_1203(self, sess: MatchSession, data: bytes) -> None:
         players = self._parse_roster_items(data)

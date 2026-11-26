@@ -191,6 +191,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .player-chip.enemy { background: var(--red-bg); border: 1px solid rgba(239,68,68,0.35); color: #fee2e2; }
 
   .chip-hero { color: #fde68a; font-weight: 600; opacity: 0.95; }
+  .chip-cc { font-size: 10px; font-weight: 700; opacity: 0.78; margin-left: 5px; letter-spacing: 0.4px; }
+  .chip-bot {
+    font-size: 9.5px; font-weight: 700; padding: 0 4px; border-radius: 4px; margin-left: 5px;
+    background: var(--amber-bg); border: 1px solid rgba(245,158,11,0.4); color: #fde68a;
+  }
+  .mini-badge.mode { background: var(--blue-bg); color: #bfdbfe; }
 
   .filters-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .filter-sep { width: 1px; height: 20px; background: var(--border); margin: 0 4px; }
@@ -634,8 +640,28 @@ INDEX_HTML = r"""<!DOCTYPE html>
         title.textContent = fmtMatchup(ally, enemy, m.server_ip, m.server_port);
         const badges = document.createElement("div");
         badges.className = "game-badges";
-        badges.innerHTML = `<span class="mini-badge">${typed || evs.length} messages</span>` +
-          (enemyTeam > 0 ? `<span class="mini-badge enemy-team">Enemy Team (${enemyTeam})</span>` : "");
+        if (m.mode_label) {
+          const mb = document.createElement("span");
+          mb.className = "mini-badge mode";
+          mb.textContent = m.mode_label;
+          badges.appendChild(mb);
+        }
+        if (m.party_label) {
+          const pb = document.createElement("span");
+          pb.className = "mini-badge";
+          pb.textContent = m.party_label;
+          badges.appendChild(pb);
+        }
+        const mc = document.createElement("span");
+        mc.className = "mini-badge";
+        mc.textContent = `${typed || evs.length} messages`;
+        badges.appendChild(mc);
+        if (enemyTeam > 0) {
+          const eb = document.createElement("span");
+          eb.className = "mini-badge enemy-team";
+          eb.textContent = `Enemy Team (${enemyTeam})`;
+          badges.appendChild(eb);
+        }
 
         btn.appendChild(top);
         btn.appendChild(title);
@@ -662,6 +688,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
       if (!q) return true;
       const hay = [
         g.source_name,
+        g.mode_label || "",
+        g.party_label || "",
         ...(g.ally_players || []),
         ...(g.enemy_players || []),
         g.preview || "",
@@ -713,6 +741,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
       const badges = document.createElement("div");
       badges.className = "game-badges";
+      if (g.mode_label) {
+        const b = document.createElement("span");
+        b.className = "mini-badge mode";
+        b.textContent = g.mode_label;
+        badges.appendChild(b);
+      }
+      if (g.party_label) {
+        const b = document.createElement("span");
+        b.className = "mini-badge";
+        b.textContent = g.party_label;
+        badges.appendChild(b);
+      }
       if (g.typed_count > 0) {
         const b = document.createElement("span");
         b.className = "mini-badge";
@@ -824,7 +864,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
     const srcLabel = game.source_name || (state.status.source_mode === "REPLAY (file)" ? "Replay" : "Live Match");
     const dur = fmtDuration((game.last_ts || 0) - (game.first_ts || 0));
     el.mhTitle.textContent = `${fmtDateTime(game.first_ts)} · ${srcLabel}`;
-    el.mhSub.textContent = [dur, game.server_ip ? `${game.server_ip}:${game.server_port}` : ""].filter(Boolean).join(" · ");
+    el.mhSub.textContent = [
+      game.mode_label || "",
+      game.party_label || "",
+      dur,
+      game.server_ip ? `${game.server_ip}:${game.server_port}` : "",
+    ].filter(Boolean).join(" · ");
 
     // Roster chips
     const players = game.players || [];
@@ -847,6 +892,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
         hs.textContent = ` · ${p.hero_name}`;
         chip.appendChild(hs);
       }
+      if (p.country) {
+        const cs = document.createElement("span");
+        cs.className = "chip-cc";
+        cs.textContent = p.country;
+        chip.appendChild(cs);
+      }
+      if (p.is_bot) {
+        const bs = document.createElement("span");
+        bs.className = "chip-bot";
+        bs.textContent = "BOT";
+        chip.appendChild(bs);
+      }
+      const tips = [];
+      if (p.uid) tips.push(`uid: ${p.uid}`);
+      if (p.zone_id) tips.push(`zone: ${p.zone_id}`);
+      if (p.party_size >= 2) tips.push(`Party of ${p.party_size}`);
+      if (tips.length) chip.title = tips.join(" · ");
       grp.appendChild(chip);
     };
     if (allies.length || enemies.length) {

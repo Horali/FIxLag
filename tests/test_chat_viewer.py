@@ -1407,4 +1407,136 @@ def test_15_history_dedup_and_dynamic_live_updates(tmp_path: Path) -> None:
         assert backfills
 
 
+def test_16_early_roster_1230_1242_mode_party_and_bots(tmp_path: Path) -> None:
+    from tools.chat_viewer.history import CACHE_SCHEMA_VERSION
+
+    assert CACHE_SCHEMA_VERSION == 5
+
+    # 1) Full draft_LIVE6.pcap: Ranked 5-stack, country distribution, metadata, zero anomalies.
+    store_d6, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_LIVE6.pcap")
+    m1, m2 = store_d6.get_matches()
+    assert m1.anomalies == []
+    assert m1.mode_label == "Ranked"
+    s1 = m1.summary_dict()
+    assert s1["mode_label"] == "Ranked"
+    assert s1["local_party_size"] == 5
+    assert s1["party_label"] == "5-stack"
+    assert s1["country_counts"] == {"ID": 2, "IN": 1, "MV": 1, "MY": 6}
+    assert len(s1["players"]) == 10
+    assert all(p["country"] and p["zone_id"] and p["room_id"] and p["is_bot"] is False for p in s1["players"])
+
+    assert m2.anomalies == []
+    s2 = m2.summary_dict()
+    assert s2["mode_label"] == "Ranked"
+    assert s2["local_party_size"] == 5
+    assert s2["party_label"] == "5-stack"
+    assert s2["country_counts"] == {"ID": 1, "IN": 1, "MV": 1, "MY": 7}
+
+    # 2) Early ban-phase cutoff BEFORE mid=1202 (t+241.3s): mid=1242 (t+164.8s) + mid=1230 (t+183.0s)
+    #    must already populate all 10 players, names, local_uid, mode, and countries!
+    rdr_early = IncrementalPcapReader()
+    pkts_d6 = rdr_early.feed((CAPTURES_DIR / "draft_LIVE6.pcap").read_bytes())
+    t0 = pkts_d6[0].ts
+    store_early = MatchStore()
+    router_early = SessionRouter(store=store_early, templates=TemplateResolver(REPO_ROOT / "data" / "__missing__.json"))
+    for pkt in pkts_d6:
+        if pkt.ts >= t0 + 235.0:
+            break
+        router_early.on_packet(pkt)
+    m_early = store_early.get_matches()[0]
+    assert m_early.local_uid == 30028189
+    assert m_early.mode_label == "Ranked"
+    assert len(m_early.players_by_uid) == 10
+    assert m_early.players_by_uid[30028189].country == "ID"
+    assert all(p.name for p in m_early.players_by_uid.values())
+
+    # 3) draft_CHAT3.pcap (Brawl Solo) & draft_CHAT4.pcap (Custom Draft).
+    store_c3, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_CHAT3.pcap")
+    s_c3 = store_c3.get_matches()[0].summary_dict()
+    assert s_c3["mode_label"] == "Brawl"
+    assert s_c3["local_party_size"] == 1
+    assert s_c3["party_label"] == "Solo"
+    assert s_c3["country_counts"] == {"ID": 10}
+
+    store_c4, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_CHAT4.pcap")
+    s_c4 = store_c4.get_matches()[0].summary_dict()
+    assert s_c4["mode_label"] == "Custom Draft"
+    assert s_c4["party_label"] == ""
+    assert s_c4["country_counts"] == {"ID": 1, "SG": 1}
+
+    # 4) Synthetic mid=1230 ('s', 1) wrapper with bRobot=1, country, zone_id, room_id, and post-freeze metadata merge.
+    def make_kcp_seg(conv: bytes, sn: int, body: bytes) -> bytes:
+        return b"\x01\x51" + conv + struct.pack("<IIIHBBH", 0, 1, sn, 64, 0, 0, len(body)) + body
+
+    def wrap_b6_msg(mid: int, inner_root: bytes) -> bytes:
+        return b"\x70\x00" + _encode_varint(mid) + b"\x46" + _encode_varint(len(inner_root)) + inner_root + b"\x80"
+
+    def make_player_item(uid: int, camp: int, seat: int, name: str, *, bot: bool = False, cc: str = "", zone: int = 0, room: int = 0) -> bytes:
+        nb = name.encode("utf-8")
+        buf = bytearray(b"\x70\x00" + _encode_varint(uid) + b"\x01" + _encode_varint(camp) + b"\x02" + _encode_varint(seat) + b"\x43" + _encode_varint(len(nb)) + nb)
+        if bot:
+            buf += b"\x04\x01"
+        if zone > 0:
+            buf += b"\x09" + _encode_varint(zone)
+        if room > 0:
+            buf += b"\x0f\x16" + _encode_varint(room)
+        if cc:
+            cb = cc.encode("ascii")
+            buf += b"\x4f\x1a" + _encode_varint(len(cb)) + cb
+        buf += b"\x80"
+        return bytes(buf)
+
+    items_1230 = [
+        make_player_item(1001, 1, 0, "HostUser", cc="id", zone=2041, room=999),
+        make_player_item(1002, 1, 1, "FriendMY", cc="my", zone=2178, room=999),
+    ]
+    s1_fields = b"\x01\x01\x02\x01\x50" + _encode_varint(len(items_1230)) + b"".join(items_1230) + b"\x80"
+    root_1230 = b"\x70\x71" + s1_fields + b"\x80"
+    pkt_1230 = wrap_b6_msg(1230, root_1230)
+
+    items_1203_post = [
+        make_player_item(1001, 2, 4, "HostUser", cc="id", zone=2041, room=999),
+        make_player_item(9001, 2, 0, "BotEnemy", bot=True, cc="sg", zone=5001, room=888),
+    ]
+    root_1203 = b"\x70\x50" + _encode_varint(len(items_1203_post)) + b"".join(items_1203_post) + b"\x80"
+    pkt_1203 = wrap_b6_msg(1203, root_1203)
+
+    store_syn = MatchStore()
+    router_syn = SessionRouter(store=store_syn, templates=TemplateResolver(tmp_path / "__missing__.json"))
+    conv = b"\xde\xad\xbe\xef"
+    out_1001 = b"\x70\x00" + _encode_varint(1001) + b"\x70\x00" + _encode_varint(1001) + b"\x80\x80"
+    frames = [
+        _build_udp_ipv4_packet("10.0.0.1", 40000, "2.2.2.2", 5507, b"\x01\x51" + conv + struct.pack("<IIIHBBH", 0, 1, 0, 64, 0, 0, len(out_1001)) + out_1001),
+        _build_udp_ipv4_packet("2.2.2.2", 5507, "10.0.0.1", 40000, make_kcp_seg(conv, 0, pkt_1230)),
+        _build_udp_ipv4_packet("2.2.2.2", 5507, "10.0.0.1", 40000, _make_030146_lzw_packet(conv, 0, _make_fake_lzw_uncompressed_words(b"\x70\x80"))),
+        _build_udp_ipv4_packet("2.2.2.2", 5507, "10.0.0.1", 40000, make_kcp_seg(conv, 1, pkt_1203)),
+    ]
+    rdr_syn = IncrementalPcapReader()
+    for pkt in rdr_syn.feed(_pcap_header(LINKTYPE_RAW) + b"".join(_pcap_record(10 + i, 0, f) for i, f in enumerate(frames))):
+        router_syn.on_packet(pkt)
+
+    m_syn = store_syn.get_matches()[0]
+    assert m_syn.mode_label == "Classic"
+    assert m_syn.players_by_uid[1001].camp == 1  # Frozen at tick 0! Must not revert to 2 from post-freeze 1203.
+    assert m_syn.players_by_uid[1001].country == "ID"
+    assert m_syn.players_by_uid[1002].country == "MY"
+    assert m_syn.players_by_uid[9001].is_bot is True
+    assert m_syn.players_by_uid[9001].country == "SG"
+    assert m_syn.summary_dict()["party_label"] == "Duo"
+
+    # 5) UI HTML includes country/bot chip classes.
+    app = create_app(
+        captures_dir=CAPTURES_DIR,
+        templates_path=tmp_path / "__missing__.json",
+        history_dir=tmp_path / "hist",
+        auto_scan_history=False,
+    )
+    with TestClient(app) as client:
+        html = client.get("/").text
+        assert ".chip-cc" in html
+        assert ".chip-bot" in html
+        assert ".mini-badge.mode" in html
+
+
+
 

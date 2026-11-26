@@ -15,7 +15,7 @@ from .templates import TemplateResolver
 
 DEFAULT_HISTORY_DIR = Path(__file__).resolve().parents[2] / "data" / "chat_history"
 MIN_PCAP_BYTES = 100
-CACHE_SCHEMA_VERSION = 4
+CACHE_SCHEMA_VERSION = 5
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -103,6 +103,9 @@ def _summarize_game(record: dict[str, Any]) -> dict[str, Any]:
         "duration_s": max(0.0, round(last_ts - first_ts, 1)),
         "local_uid": local_uid,
         "local_camp": local_camp,
+        "mode_label": record.get("mode_label") or "",
+        "party_label": record.get("party_label") or "",
+        "country_counts": record.get("country_counts") or {},
         "ally_players": ally_names,
         "enemy_players": enemy_names,
         "typed_count": typed_count,
