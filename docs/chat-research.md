@@ -215,10 +215,24 @@ CData_BattleFastChatMessage_Element      m_ID 0x14, m_mMessage 0x18, m_mMessageS
 
 `m_mMessage` / `m_mMessageSend` carry the text, so this table is the quick-chat and draft-suggestion vocabulary (ban suggestions, hero requests) rather than free text.
 
-**Blocker.** The element storage lives in the generic base `TableStreamBase<K,T,E,K,E>`, whose fields resolve to offset `0x0` in the open generic metadata, so the dictionary offset differs per closed instantiation and is not directly usable. Enumerating elements needs the closed generic layout resolved at runtime, or a method call through the engine frame (hook `Camera::GameUpdate` and invoke `GetInstance()`/indexer there — a new thread's call is not acknowledged by the game).
+**Resolved (live, 2026-11-26, zero scan, read-only).** The open generic shows `0x0`, but the closed parent class at runtime has real offsets. `il2cpp_class_get_field_from_name` / the runtime `field()` walk up the parent chain and return them. Live layout:
+
+```
+TableStreamInterf (non-generic root)  fields 0x10..0x9c, instance size 0xa0  (dataRowNum 0x34)
+TableStreamBase<int,...>              m_keyDic 0xa0, m_bHasInited 0xac, m_Data_IsFullLoaded 0xae,
+                                      m_Data 0xb0, m_DataWriteTarget 0xb8   (size 0xe0)
+TableStream<int,...>                  m_keyDicDelete 0xe0, _callReturn 0xe8 (size 0xf0)
+CData_BattleFastChatMessage           mask* fields from 0xf0           (size 0x148)
+SharedDictionary<int,E>               m_dic 0x10 (Dictionary<int,object>), _values 0x18
+```
+
+So the rows are `m_Instance -> m_Data -> m_dic`, a normal `Dictionary<int, object>` (entry stride 24). The live read gave 601 rows. Each value was a `CData_BattleFastChatMessage_Element` with `m_ID == key`, for example `101 "Beware of Ambush."` and `102 "Enemy Missing!"`.
+
+Completeness test: compare the `m_dic` count with `dataRowNum` (the header row total). Do not use `m_keyDic` or `m_Data_IsFullLoaded`. In the same session `m_keyDic` first had 601 entries and later 0, and the flag stayed `false` while all 601 rows were present. No method call is necessary.
 
 ### 7.3 Tooling
 
 - `tools/frida/chatcfg_anchor_probe.js` — the zero-scan read of the conversion table and channel ids.
 - `tools/frida/chat_probe.js` — the chat record read (needs a scan to find the UI instance; keep budgets small and run outside matches).
+- `tools/frida/fastchat_table_probe.js` — the zero-scan read of the quick-chat table; prints the resolved base layout and every row.
 - `tools/frida/run_any_probe.py` — generic runner that prints every event, needed because the suite runner filters output.
