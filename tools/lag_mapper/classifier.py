@@ -9,19 +9,19 @@ from tools.draft_probe import IFACE_NAMES, IGNORED_PORTS, KNOWN_IP, PREFIX_HINTS
 
 # SVG hub coordinates on an 800x360 regional map viewBox (West=left, East=right).
 CITY_CLUSTERS: dict[str, dict[str, Any]] = {
-    "surabaya": {"label": "Surabaya (You)", "x": 430, "y": 298},
-    "jakarta": {"label": "Jakarta", "x": 368, "y": 282},
-    "singapore": {"label": "Singapore", "x": 336, "y": 234},
-    "kuala_lumpur": {"label": "Kuala Lumpur", "x": 286, "y": 200},
-    "bangkok": {"label": "Bangkok", "x": 298, "y": 146},
-    "manila": {"label": "Manila", "x": 512, "y": 168},
-    "india": {"label": "India (Mumbai/Delhi)", "x": 182, "y": 148},
-    "almaty": {"label": "Almaty", "x": 216, "y": 74},
-    "istanbul": {"label": "Istanbul", "x": 108, "y": 82},
-    "tokyo": {"label": "Tokyo", "x": 608, "y": 116},
-    "sydney": {"label": "Sydney", "x": 632, "y": 308},
-    "dallas": {"label": "Dallas / US", "x": 726, "y": 94},
-    "europe_unknown": {"label": "Europe / Unknown", "x": 76, "y": 162},
+    "surabaya": {"label": "Surabaya (You)", "x": 468, "y": 310},
+    "jakarta": {"label": "Jakarta", "x": 352, "y": 274},
+    "singapore": {"label": "Singapore", "x": 318, "y": 224},
+    "kuala_lumpur": {"label": "Kuala Lumpur", "x": 258, "y": 182},
+    "bangkok": {"label": "Bangkok", "x": 298, "y": 134},
+    "manila": {"label": "Manila", "x": 524, "y": 168},
+    "india": {"label": "India (Mumbai/Delhi)", "x": 176, "y": 146},
+    "almaty": {"label": "Almaty", "x": 216, "y": 68},
+    "istanbul": {"label": "Istanbul", "x": 106, "y": 78},
+    "tokyo": {"label": "Tokyo", "x": 616, "y": 114},
+    "sydney": {"label": "Sydney", "x": 642, "y": 308},
+    "dallas": {"label": "Dallas / US", "x": 728, "y": 92},
+    "europe_unknown": {"label": "Europe / Unknown", "x": 78, "y": 168},
 }
 
 _OBSERVED_SUBNETS: tuple[tuple[str, str, str, str], ...] = (

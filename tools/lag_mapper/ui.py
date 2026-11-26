@@ -7,6 +7,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
 <title>FIxLag — Server Map &amp; Live Packet Mapper</title>
 <style>
   :root {
@@ -500,6 +501,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     selectedMatchKey: null,
     feedItems: [],
     liveRttPoints: [],
+    liveSeq: 0,
     lastEventId: 0
   };
 
@@ -792,7 +794,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     const ep = live.active_endpoint;
     const epPill = document.getElementById("live-active-ep");
-    epPill.textContent = ep ? `${ep.ep} · ${ep.provider} (${ep.city})` : "No active match";
+    if (ep) {
+      const locTxt = ep.city && ep.city.startsWith(ep.provider) ? ep.city : `${ep.provider} (${ep.city})`;
+      epPill.textContent = `${ep.ep} · ${locTxt}`;
+    } else {
+      epPill.textContent = "No active match";
+    }
 
     const links = (live.rtt && live.rtt.links) || {};
     const statParts = [];
@@ -906,7 +913,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
       document.getElementById("selected-server-box").textContent = "-";
     } else {
       if (!state.selectedMatchKey || !matches.some((m) => m.match_key === state.selectedMatchKey)) {
-        state.selectedMatchKey = matches[0].match_key;
+        const withRoster = matches.find((m) => (m.players && m.players.length > 0) || (m.ally_party_players && m.ally_party_players.length > 0));
+        state.selectedMatchKey = (withRoster || matches[0]).match_key;
       }
       sel.innerHTML = matches.map((m) => {
         const lbl = `${fmtTs(m.first_ts)} · ${m.mode_label || m.origin} · ${m.party_mix_label || "-"} -> ${m.server_ip}:${m.server_port} (${m.city})`;
@@ -1045,6 +1053,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   async function refreshAllData() {
+    const seqAtStart = state.liveSeq;
     try {
       const [ov, srv, ms, corr, live] = await Promise.all([
         apiGet("/api/overview"),
@@ -1058,12 +1067,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
       state.clusters = srv.clusters || {};
       state.matches = ms.matches || [];
       state.correlations = corr;
-      state.live = live;
-      state.feedItems = (live && live.feed) || [];
+      if (state.liveSeq === seqAtStart) {
+        state.live = live;
+        if (live && Array.isArray(live.feed) && (live.feed.length > 0 || state.feedItems.length === 0)) {
+          state.feedItems = live.feed;
+        }
+        renderLive();
+      }
       renderOverview();
       renderHubMap();
       renderServersTable();
-      renderLive();
       renderPartyTab();
       renderMatchesTable();
     } catch (_err) {
@@ -1136,6 +1149,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     const follow = document.getElementById("pcap-follow-chk").checked;
     if (!path) { showSourceError("Select a .pcap file"); return; }
     showSourceError("");
+    state.liveSeq += 1;
     state.feedItems = [];
     state.liveRttPoints = [];
     const res = await apiPost("/api/source", { mode: "pcap", path, follow });
@@ -1147,6 +1161,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     const tee = document.getElementById("adb-tee-chk").checked;
     if (!serial) { showSourceError("No ADB device selected"); return; }
     showSourceError("");
+    state.liveSeq += 1;
     state.feedItems = [];
     state.liveRttPoints = [];
     const res = await apiPost("/api/source", { mode: "adb", serial, tee });
@@ -1155,6 +1170,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   document.getElementById("stop-source-btn").addEventListener("click", async () => {
     showSourceError("");
+    state.liveSeq += 1;
     await apiPost("/api/source", { mode: "stop" });
     await refreshAllData();
   });
@@ -1239,6 +1255,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         const d = JSON.parse(ev.data);
         const items = d.items || [];
         if (items.length) {
+          state.liveSeq += 1;
           state.feedItems = state.feedItems.concat(items).slice(-400);
           renderFeed();
         }
@@ -1249,14 +1266,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
         const d = JSON.parse(ev.data);
         const pts = d.points || [];
         if (pts.length) {
+          state.liveSeq += 1;
           state.liveRttPoints = state.liveRttPoints.concat(pts).slice(-360);
           renderSparkline();
         }
       } catch (_e) {}
     });
     es.addEventListener("match_update", async () => {
+      const seq = ++state.liveSeq;
       try {
-        state.live = await apiGet("/api/live/packets");
+        const live = await apiGet("/api/live/packets");
+        if (state.liveSeq !== seq) return;
+        state.live = live;
+        if (live && Array.isArray(live.feed) && live.feed.length > 0) {
+          state.feedItems = live.feed;
+        }
         renderLive();
       } catch (_e) {}
     });
