@@ -898,8 +898,13 @@ def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
         json.dumps(
             {
                 "messages": {
-                    "2/2": "[Emoji] Love",
-                    "2/3": "[Emoji] Cry",
+                    "2/0": "I'll go Mid Lane.",
+                    "2/2": "I'll roam.",
+                    "2/3": "I'll Jungle.",
+                    "2/9": "I'll go Exp Lane.",
+                    "2/16": "We got this!",
+                    "4": "I want to go {lane}",
+                    "4_hero": "I want to use {hero} to go to {lane}.",
                     "5/3": "I'm {0} and I want to use {1}.",
                     "5/3_notitle": "I want to use {2}. My current Hero Power is {1}.",
                     "5/5": "I want to use {hero}. {1}, {2}",
@@ -915,6 +920,7 @@ def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
                 },
                 "heroes": {
                     "17": {"name": "Fanny", "role": "Assassin"},
+                    "55": {"name": "Angela", "role": "Support"},
                     "88": {"name": "Masha", "role": "Fighter/Tank"},
                     "114": {"name": "Melissa", "role": "Marksman"},
                     "126": {"name": "Suyou", "role": "Assassin/Fighter"},
@@ -922,6 +928,13 @@ def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
                 },
                 "strings": {
                     "11010": "Ban {hero} ({role})",
+                },
+                "lanes": {
+                    "1": "Exp Lane",
+                    "2": "Mid Lane",
+                    "3": "Roaming",
+                    "4": "Jungling",
+                    "5": "Gold Lane",
                 },
             }
         ),
@@ -949,8 +962,15 @@ def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
     assert tr.format_text("8/48273/0") == ("Which hero should we ban?", True)
     assert tr.format_text("12/40200") == ("[Emote] Genius!", True)
     assert tr.format_text("12/40677") == ("[Emote] Hahaha!", True)
-    assert tr.format_text("2/2") == ("[Emoji] Love", True)
-    assert tr.format_text("2/0") == ("2/0", True)
+    assert tr.format_text("2/0", channel=1) == ("I'll go Mid Lane.", True)
+    assert tr.format_text("2/0", channel=10) == ("2/0", True)
+    assert tr.format_text("2/2", channel=4) == ("I'll roam.", True)
+    assert tr.format_text("2/3", channel=4) == ("I'll Jungle.", True)
+    assert tr.format_text("2/9", channel=1) == ("I'll go Exp Lane.", True)
+    assert tr.format_text("4/3", channel=1) == ("I want to go Roaming", True)
+    assert tr.format_text("4/1", channel=1) == ("I want to go Exp Lane", True)
+    assert tr.format_text("4/5", channel=1) == ("I want to go Gold Lane", True)
+    assert tr.format_text("4/3/55", channel=1) == ("I want to use Angela to go to Roaming.", True)
     assert tr.format_text("5/47544373") == ("5/47544373", True)
 
     real_tmpl = REPO_ROOT / "data" / "chat_templates.json"
@@ -959,9 +979,18 @@ def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
             store, _, _ = _decode_pcap_whole(CAPTURES_DIR / cap_name, templates_path=real_tmpl)
             for sess in store.get_matches():
                 for ev in sess.events:
-                    if ev.is_template and not ev.raw_text.startswith("2/0"):
+                    if ev.is_template and not (ev.channel == 10 and ev.raw_text == "2/0"):
                         assert ev.display_text != ev.raw_text, f"{cap_name}: unexpanded {ev.raw_text!r}"
                         assert "[-]" not in ev.display_text
                         assert "[f6d57f]" not in ev.display_text
+
+        live_cap = CAPTURES_DIR / "live_20261126_234439.pcap"
+        if live_cap.is_file():
+            store_live, _, _ = _decode_pcap_whole(live_cap, templates_path=real_tmpl)
+            evs_live = [(ev.sender_name, ev.channel, ev.raw_text, ev.display_text) for s in store_live.get_matches() for ev in s.events]
+            assert ("mashasha", 1, "2/9", "I'll go Exp Lane.") in evs_live
+            assert ("Chudvial999", 1, "4/3", "I want to go Roaming") in evs_live
+            ch10_20 = [ev for ev in evs_live if ev[1] == 10 and ev[2] == "2/0"]
+            assert ch10_20 and all(ev[3] == "2/0" for ev in ch10_20)
 
 
