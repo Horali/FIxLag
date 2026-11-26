@@ -39,6 +39,7 @@ class TemplateResolver:
         self.heroes: dict[str, str] = {}
         self.hero_roles: dict[str, str] = {}
         self.strings: dict[str, str] = {}
+        self.lanes: dict[str, str] = {}
         self._scoped_prefixes: set[str] = set()
         self.loaded = False
         self.reload()
@@ -49,6 +50,7 @@ class TemplateResolver:
         self.heroes.clear()
         self.hero_roles.clear()
         self.strings.clear()
+        self.lanes.clear()
         self._scoped_prefixes.clear()
         self.loaded = False
         if not self.path or not self.path.is_file():
@@ -60,10 +62,11 @@ class TemplateResolver:
         if not isinstance(data, dict):
             return
 
-        if any(k in data for k in ("messages", "heroes", "strings")):
+        if any(k in data for k in ("messages", "heroes", "strings", "lanes")):
             msgs = data.get("messages") or {}
             heroes = data.get("heroes") or {}
             strings = data.get("strings") or {}
+            lanes = data.get("lanes") or {}
             if isinstance(msgs, dict):
                 self.messages = {str(k): str(v) for k, v in msgs.items()}
             if isinstance(heroes, dict):
@@ -80,6 +83,8 @@ class TemplateResolver:
                         self.heroes[sk] = str(v)
             if isinstance(strings, dict):
                 self.strings = {str(k): str(v) for k, v in strings.items()}
+            if isinstance(lanes, dict):
+                self.lanes = {str(k): str(v) for k, v in lanes.items()}
         else:
             self.messages = {str(k): str(v) for k, v in data.items()}
 
@@ -214,12 +219,46 @@ class TemplateResolver:
             return self._apply_hero_placeholders(tmpl, hero, role), True
         return f"Suggest {hero}", True
 
-    def format_text(self, raw_text: str) -> tuple[str, bool]:
+    def _format_prefixed_4(self, raw_text: str) -> tuple[str, bool]:
+        primary = raw_text.split("|", 1)[0]
+        p4 = primary.split("/")
+        if len(p4) == 2:
+            lane_id = p4[1].strip()
+            tmpl = self.messages.get(f"4/{lane_id}")
+            if tmpl:
+                return _clean_mlbb_text(tmpl), True
+            lane = self.lanes.get(lane_id)
+            if lane:
+                base_tmpl = _clean_mlbb_text(self.messages.get("4") or "I want to go {lane}")
+                out = base_tmpl.replace("{lane}", lane).replace("{0}", lane)
+                return re.sub(r" {2,}", " ", out).strip(), True
+            return raw_text, True
+
+        if len(p4) >= 3:
+            lane_id = p4[1].strip()
+            hero_id = p4[2].strip()
+            lane = self.lanes.get(lane_id)
+            hero = self.heroes.get(hero_id)
+            if lane and hero:
+                tmpl = _clean_mlbb_text(
+                    self.messages.get("4_hero") or "I want to use {hero} to go to {lane}."
+                )
+                out = (
+                    tmpl.replace("{hero}", hero)
+                    .replace("{0}", hero)
+                    .replace("{lane}", lane)
+                    .replace("{1}", lane)
+                )
+                return re.sub(r" {2,}", " ", out).strip(), True
+        return raw_text, True
+
+    def format_text(self, raw_text: str, *, channel: int | None = None) -> tuple[str, bool]:
         """Return `(display_text, is_template)` for *raw_text*.
 
         - `1/<text>` -> `(<text>, False)`
-        - Structured slash templates (`2/...`, `3/...`, `5/...`, `7/...`, `8/...`, `12/...`):
+        - Structured slash templates (`2/...`, `3/...`, `4/...`, `5/...`, `7/...`, `8/...`, `12/...`):
           expand using loaded JSON tables if available, otherwise return `raw_text` verbatim.
+        - `ch=10` (`2/0` post-match state) is left raw so it never mis-expands as draft quick-chat.
         - Plain text -> `(raw_text, False)`
         """
         if not raw_text:
@@ -233,6 +272,12 @@ class TemplateResolver:
             return raw_text, False
 
         prefix = parts[0]
+        if prefix == "2" and channel == 10:
+            return raw_text, True
+
+        if prefix == "4":
+            return self._format_prefixed_4(raw_text)
+
         if prefix == "3" and len(parts) >= 3:
             str_id = parts[1].strip()
             hero_id = parts[2].strip()

@@ -15,7 +15,7 @@ from .templates import TemplateResolver
 
 DEFAULT_HISTORY_DIR = Path(__file__).resolve().parents[2] / "data" / "chat_history"
 MIN_PCAP_BYTES = 100
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -185,6 +185,14 @@ class MatchHistoryStore:
                     rec.setdefault("game_id", gid)
                     rec.setdefault("origin", "live")
                     rec.setdefault("source_name", "Live capture")
+                    if self.templates.loaded:
+                        for ev in rec.get("events") or []:
+                            if isinstance(ev, dict) and ev.get("raw_text"):
+                                disp, is_tmpl = self.templates.format_text(
+                                    str(ev["raw_text"]), channel=ev.get("channel")
+                                )
+                                ev["display_text"] = disp
+                                ev["is_template"] = is_tmpl
                     self._live_games[gid] = rec
 
         cache_raw = _read_json_safe(self._cache_path)

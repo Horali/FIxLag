@@ -46,6 +46,18 @@ ROLE_NAMES = {
     6: "Support",
 }
 
+CHOOSE_HERO_BP_PREFIX_HASH = 0xF6A38AEA
+CHOOSE_HERO_CLASSIC_PREFIX_HASH = 0xBBFF815C
+LANE_SHOWMESSAGE_IDS = {
+    0: 37222,  # Any Lane
+    1: 37223,  # Exp Lane
+    2: 37224,  # Mid Lane
+    3: 37225,  # Roaming
+    4: 37226,  # Jungling
+    5: 37227,  # Gold Lane
+    6: 37228,  # Role Fill
+}
+
 CURATED_STRING_IDS = {11010, 11011, 11012, 12154}
 CURATED_SHOWMESSAGE_IDS = {
     10498,
@@ -55,6 +67,7 @@ CURATED_SHOWMESSAGE_IDS = {
     12154,
     12282,
     12283,
+    12568,
     12569,
     15336,
     15337,
@@ -73,6 +86,7 @@ CURATED_SHOWMESSAGE_IDS = {
     33188,
     *range(36415, 36423),
     *range(36427, 36430),
+    *range(37222, 37229),
     48272,
     48273,
     48281,
@@ -85,8 +99,13 @@ _BBCODE_RE = re.compile(r"\[(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8}|-)\]")
 
 def pk_hash(key: str) -> int:
     """Compute MLBB's 32-bit unsigned base-31 `PKHash` for `<Table>_<Column>_<ID>`."""
-    h = 0
-    for ch in key:
+    return pk_hash_continue(0, key)
+
+
+def pk_hash_continue(base_hash: int, suffix: str) -> int:
+    """Advance an existing 32-bit base-31 `PKHash` with *suffix*."""
+    h = base_hash & 0xFFFFFFFF
+    for ch in suffix:
         h = (h * 31 + ord(ch)) & 0xFFFFFFFF
     return h
 
@@ -307,12 +326,42 @@ def build_templates_dict(archive_bytes: bytes, captures_dir: Path | None = None)
         if nm:
             messages_out[f"12/{eid}"] = f"[Emote] {clean_text(nm)}"
 
-    # 2/<id> Emoji
+    # 2/<idx> Hero-select quick chats (UI_ChooseHeroBP m_zLabel_Message01..15 / LaneMessage16..21)
+    for idx in range(1, 16):
+        val = lang.get(pk_hash_continue(CHOOSE_HERO_BP_PREFIX_HASH, f"m_zLabel_Message{idx:02d}"))
+        if not val and idx <= 13:
+            val = lang.get(pk_hash_continue(CHOOSE_HERO_CLASSIC_PREFIX_HASH, f"m_zLabel_Message{idx:02d}"))
+        if val:
+            messages_out[f"2/{idx - 1}"] = clean_text(val)
+    for idx in range(16, 22):
+        val = lang.get(pk_hash_continue(CHOOSE_HERO_BP_PREFIX_HASH, f"m_zLabel_LaneMessage{idx:02d}"))
+        if val:
+            messages_out[f"2/{idx - 1}"] = clean_text(val)
+
+    # Static UI emojis stored separately (`emojis`) so they never collide with 2/<idx>
     emoji_idx = parse_table_index(files["Emoji.bytes"])
+    emojis_out: dict[str, str] = {}
     for eid in sorted(emoji_idx):
         nm = lookup("Emoji", "mEmojiName", eid)
         if nm:
-            messages_out[f"2/{eid}"] = f"[Emoji] {clean_text(nm)}"
+            emojis_out[str(eid)] = clean_text(nm)
+
+    # 4/<lane_id>[/<hero_id>] lane declarations from ShowMessage 12568 / 12569 / 37222..37228
+    lanes_out: dict[str, str] = {}
+    for lid, sm_id in LANE_SHOWMESSAGE_IDS.items():
+        val = lookup("ShowMessage", "mMessage", sm_id)
+        if val:
+            lanes_out[str(lid)] = clean_text(val)
+
+    sm_12568 = lookup("ShowMessage", "mMessage", 12568)
+    if sm_12568:
+        messages_out["4"] = clean_text(sm_12568).replace("{0}", "{lane}")
+    sm_12569 = lookup("ShowMessage", "mMessage", 12569)
+    if sm_12569:
+        messages_out["4_hero"] = clean_text(sm_12569).replace("{0}", "{hero}").replace("{1}", "{lane}")
+    if "4" in messages_out:
+        for lid, lane_name in lanes_out.items():
+            messages_out[f"4/{lid}"] = messages_out["4"].replace("{lane}", lane_name)
 
     # BattleFastChatMessage quick-chats (kept under separate key + fastchat/* prefix)
     fc_idx = parse_table_index(files["BattleFastChatMessage.bytes"])
@@ -328,6 +377,8 @@ def build_templates_dict(archive_bytes: bytes, captures_dir: Path | None = None)
         "messages": messages_out,
         "heroes": heroes_out,
         "strings": strings_out,
+        "lanes": lanes_out,
+        "emojis": emojis_out,
         "fastchat": fastchat_out,
     }
 
@@ -389,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
         f"messages={len(payload['messages'])}, "
         f"heroes={len(payload['heroes'])}, "
         f"strings={len(payload['strings'])}, "
+        f"lanes={len(payload['lanes'])}, "
         f"fastchat={len(payload['fastchat'])})"
     )
     return 0

@@ -1111,7 +1111,7 @@ class SessionRouter:
             self._refresh_local_attribution(sess)
 
         side = self._resolve_side(sess, uid=uid, camp=camp)
-        display_text, is_template = self.templates.format_text(raw_text)
+        display_text, is_template = self.templates.format_text(raw_text, channel=ch)
 
         seq_id = sess._next_seq_id
         sess._next_seq_id += 1
