@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import shutil
 import struct
 import sys
 import time
@@ -17,6 +18,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from tools.chat_viewer.battle import Lzw16Decoder
+from tools.chat_viewer.history import MatchHistoryStore
 from tools.chat_viewer.kcp import KcpStreamReassembler
 from tools.chat_viewer.pcap_reader import (
     LINKTYPE_ETHERNET,
@@ -484,7 +486,9 @@ def test_9_http_sse_integration_templates_and_fallback(tmp_path: Path) -> None:
     app = create_app(
         captures_dir=CAPTURES_DIR,
         templates_path=tmpl_file,
+        history_dir=tmp_path / "hist",
         heartbeat_interval=0.2,
+        auto_scan_history=False,
     )
     with TestClient(app) as client:
         r_home = client.get("/")
@@ -583,4 +587,108 @@ def test_9_http_sse_integration_templates_and_fallback(tmp_path: Path) -> None:
         assert all(eid > first_id for eid, _, _ in replayed)
         assert [eid for eid, _, _ in replayed] == sorted(eid for eid, _, _ in replayed)
 
-        client.post("/api/source", json={"mode": "stop"})
+        stop_res = client.post("/api/source", json={"mode": "stop"})
+        assert stop_res.status_code == 200
+        assert stop_res.json()["status"]["source_detail"] == ""
+
+
+def test_10_past_games_history_cache_and_api(tmp_path: Path) -> None:
+    caps_dir = tmp_path / "caps"
+    hist_dir = tmp_path / "hist"
+    caps_dir.mkdir()
+
+    shutil.copyfile(CAPTURES_DIR / "draft_CHAT4.pcap", caps_dir / "draft_CHAT4.pcap")
+    shutil.copyfile(CAPTURES_DIR / "live_chat_check.pcap", caps_dir / "live_chat_check.pcap")
+
+    # Also drop an empty non-chat UDP capture (>100 B) to verify include_empty filtering.
+    empty_pkt = _build_udp_ipv4_packet("10.0.0.2", 5009, "10.0.0.1", 41000, b"\x01\x75\x11\x22\x33\x44\x04\x00\x70\x00\x00\x80")
+    (caps_dir / "empty_probe.pcap").write_bytes(
+        _pcap_header(LINKTYPE_RAW) + _pcap_record(1, 0, empty_pkt) + _pcap_record(2, 0, empty_pkt)
+    )
+
+    tr = TemplateResolver(tmp_path / "__missing__.json")
+    hist = MatchHistoryStore(captures_dir=caps_dir, history_dir=hist_dir, templates=tr)
+    hist.start_background_scan()
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        listing = hist.list_games(include_empty=True)
+        if not listing["scan"]["scanning"] and listing["scan"]["done"] >= 3:
+            break
+        time.sleep(0.05)
+
+    with_chat = hist.list_games(include_empty=False)
+    assert with_chat["total_with_chat"] == 1
+    assert with_chat["total_all"] == 3
+    g_sum = with_chat["games"][0]
+    assert g_sum["game_id"] == "pcap:draft_CHAT4.pcap:m1"
+    assert g_sum["enemy_team_count"] == 5
+    assert g_sum["typed_count"] == 24
+    assert g_sum["quickchat_count"] == 9
+    assert g_sum["ally_players"] == ["naradira"]
+    assert g_sum["enemy_players"] == ["E1dreda."]
+    assert "team rex" in g_sum["preview"]
+
+    all_caps = hist.list_games(include_empty=True)
+    assert any(g["game_id"] == "pcap:live_chat_check.pcap:m1" and g["has_gaps"] for g in all_caps["games"])
+
+    full_game = hist.get_game("pcap:draft_CHAT4.pcap:m1")
+    assert full_game is not None
+    assert len(full_game["events"]) == 33
+    assert len(full_game["players"]) == 2
+
+    # Second instance loads cached games instantaneously without rescanning.
+    hist_reloaded = MatchHistoryStore(captures_dir=caps_dir, history_dir=hist_dir, templates=tr)
+    assert hist_reloaded.list_games(include_empty=False)["total_with_chat"] == 1
+
+    # HTTP /api/history + live save/delete checks via TestClient.
+    app = create_app(
+        captures_dir=caps_dir,
+        history_dir=hist_dir,
+        templates_path=tmp_path / "__missing__.json",
+        auto_scan_history=True,
+    )
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            r_h = client.get("/api/history")
+            if not r_h.json()["scan"]["scanning"] and r_h.json()["total_with_chat"] >= 1:
+                break
+            time.sleep(0.05)
+
+        r_h = client.get("/api/history?include_empty=0")
+        assert r_h.status_code == 200
+        assert r_h.json()["total_with_chat"] == 1
+
+        r_g = client.get("/api/history/pcap:draft_CHAT4.pcap:m1")
+        assert r_g.status_code == 200
+        assert len(r_g.json()["events"]) == 33
+
+        assert client.get("/api/history/pcap:missing.pcap:m1").status_code == 404
+        assert client.delete("/api/history/pcap:draft_CHAT4.pcap:m1").status_code == 400
+
+        # Following a capture saves it as a live game upon stop and shows it in /api/history.
+        r_follow = client.post(
+            "/api/source",
+            json={"mode": "pcap", "path": str(caps_dir / "draft_CHAT4.pcap"), "follow": True},
+        )
+        assert r_follow.status_code == 200
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            ms = client.get("/api/matches").json()["matches"]
+            if ms and len(ms[0]["events"]) == 33:
+                break
+            time.sleep(0.05)
+
+        r_stop = client.post("/api/source", json={"mode": "stop"})
+        assert r_stop.status_code == 200
+        assert r_stop.json()["status"]["source_detail"] == ""
+
+        live_games = [g for g in client.get("/api/history").json()["games"] if g["origin"] == "live"]
+        assert len(live_games) == 1
+        live_gid = live_games[0]["game_id"]
+        assert live_gid == "live:231398567527828650"
+
+        assert client.delete(f"/api/history/{live_gid}").status_code == 200
+        assert client.delete(f"/api/history/{live_gid}").status_code == 404
+        assert all(g["game_id"] != live_gid for g in client.get("/api/history").json()["games"])
+

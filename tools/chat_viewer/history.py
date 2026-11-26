@@ -44,6 +44,9 @@ def _best_preview(events: list[dict[str, Any]]) -> str:
         return f"{sender}: {text}" if text else sender
 
     for ev in events:
+        if ev.get("side") == "ENEMY" and ev.get("channel") == 2 and not ev.get("is_template"):
+            return _fmt(ev)
+    for ev in events:
         if ev.get("side") == "ENEMY" and ev.get("channel") in (2, 4) and not ev.get("is_template"):
             return _fmt(ev)
     for ev in events:
