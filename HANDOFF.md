@@ -7,11 +7,12 @@ Finding: ping variance is server-side (city/provider/IP); client-side tools only
 ## Current state
 - Research phase complete; `tools/parse_pcap.py` and `tools/draft_probe.py` work via rooted ADB on SM-S936B (`RRCY1032Y6F`).
 - `tools/chat_viewer` runs a `127.0.0.1` web + SSE viewer for live ADB tcpdump or saved `.pcap` replays (`mid=1242`/`1230`/`1202`/`1203`, mode, country, bot, party size, hero picks).
+- Live ADB supports zero-drop make-before-break USB <-> Wireless hot-switching (`switch_adb`, `_PcapTeeWriter`), `preserve_session` resume, and `/api/adb/wireless` connect.
 - `03 01 46` field `0x01` packs 7-bit tick offsets for extra fields (`0x43..0x46` / `0x53..0x56`); gaps tag `reason` (`mid_match`, `packet_loss`, `desync`).
-- Past Games deduplicates `live:` vs `pcap:` records by `battle_id` (fallback `(ip, port, first_ts <= 5s)`), prefers richer/newer `.pcap` records (`CACHE_SCHEMA_VERSION = 6`), auto-indexes teed captures on stop, and pushes `history_updated` SSE events.
+- Past Games merges split captures per `battle_id`, backfills slot/UID names via `SessionRouter` roster/UID history lookups, auto-indexes teed captures on stop (`CACHE_SCHEMA_VERSION = 6`), and pushes `history_updated`.
 - Specification ready for FIxLag Server & Live Packet Mapper (`127.0.0.1:8766`): [docs/lag-mapper-spec.md](docs/lag-mapper-spec.md).
 - `tools/lag_mapper` runs a `127.0.0.1:8766` (auto-fallback) web + SSE server with 4 tabs, `:30101` batch Zstd (`mid=10208` dropped), `0x3f5` Wi-Fi vs Cellular RTT, `:30190` probes, TCP `:port+50` mirror, trusted-Wi-Fi wireless ADB (`Kos gk atas`, `Pribadi`), and `matches.csv` + `lag_mapper_notes.json` persistence.
-- Test suite (`pytest -v tests/test_chat_viewer.py`): 17 tests passing.
+- Test suite (`pytest -v tests/test_chat_viewer.py`): 18 tests passing.
 - Packet mapper suite (`pytest -v tests/test_lag_mapper.py`): 9 tests passing.
 
 ## Active tasks
