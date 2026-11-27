@@ -1614,6 +1614,391 @@ def test_17_packed_7bit_tick_deltas_and_gap_reasons(tmp_path: Path) -> None:
         assert "Stream resync" in html
 
 
+def test_18_adb_hot_switch_make_before_break_and_name_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+    import os
+    from tools.chat_viewer import ingest as ingest_mod
+    from tools.chat_viewer.ingest import IngestController
+
+    def make_kcp_seg(conv: bytes, sn: int, body: bytes) -> bytes:
+        return b"\x01\x51" + conv + struct.pack("<IIIHBBH", 0, 1, sn, 64, 0, 0, len(body)) + body
+
+    def make_roster_msg(mid: int, players: list[tuple[int, int, int, str, int | None]]) -> bytes:
+        items = []
+        for uid, camp, seat, name, hero_id in sorted(players, key=lambda x: x[0]):
+            nb = name.encode("utf-8")
+            item = (
+                b"\x70\x00"
+                + _encode_varint(uid)
+                + b"\x01"
+                + _encode_varint(camp)
+                + b"\x02"
+                + _encode_varint(seat)
+                + b"\x43"
+                + _encode_varint(len(nb))
+                + nb
+            )
+            if hero_id is not None:
+                item += b"\x07" + _encode_varint(hero_id)
+            item += b"\x80"
+            items.append(item)
+        return b"\x70\x00" + _encode_varint(mid) + b"\x70\x50" + _encode_varint(len(items)) + b"".join(items) + b"\x80"
+
+    def make_ev06_item(slot: int, ch: int, text: str, msg_uid: str = "") -> bytes:
+        tb = text.encode("utf-8")
+        cb = b"\x70\x00" + _encode_varint(ch) + b"\x41" + _encode_varint(len(tb)) + tb
+        if msg_uid:
+            mb = msg_uid.encode("utf-8")
+            cb += b"\x4b" + _encode_varint(len(mb)) + mb
+        cb += b"\x80"
+        return b"\x70\x00" + _encode_varint(slot) + b"\x01\x06\x43" + _encode_varint(len(cb)) + cb + b"\x80"
+
+    def make_tick_item_list(ev_items: list[bytes]) -> bytes:
+        if not ev_items:
+            return b"\x70\x80"
+        return b"\x70\x51" + _encode_varint(len(ev_items)) + b"".join(ev_items) + b"\x80"
+
+    class _FakePipeProc:
+        def __init__(self) -> None:
+            r_fd, w_fd = os.pipe()
+            self.stdout = os.fdopen(r_fd, "rb", buffering=0)
+            self._w_fd: int | None = w_fd
+            self.stderr = io.BytesIO(b"")
+            self._rc: int | None = None
+            self._lock = __import__("threading").Lock()
+
+        def feed_bytes(self, data: bytes) -> None:
+            with self._lock:
+                if self._w_fd is not None and data:
+                    os.write(self._w_fd, data)
+
+        def close_writer(self, rc: int = 0) -> None:
+            with self._lock:
+                if self._w_fd is not None:
+                    self._rc = rc
+                    os.close(self._w_fd)
+                    self._w_fd = None
+
+        def poll(self) -> int | None:
+            return self._rc
+
+        def terminate(self) -> None:
+            self.close_writer(0)
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self._rc if self._rc is not None else 0
+
+        def kill(self) -> None:
+            self.close_writer(-9)
+
+    caps_dir = tmp_path / "caps"
+    caps_dir.mkdir()
+    tmpl_file = tmp_path / "tmpl.json"
+    tmpl_file.write_text(json.dumps({"heroes": {"17": "Fanny", "55": "Angela", "88": "Masha"}}), encoding="utf-8")
+    adb_exe = tmp_path / "adb.exe"
+    adb_exe.write_bytes(b"")
+
+    conv = b"\x01\x02\x03\x04"
+    enc_table: dict[bytes, int] = {bytes([i]): i for i in range(256)}
+    enc_next = 0x0101
+
+    def enc_lzw(raw_data: bytes) -> bytes:
+        nonlocal enc_next
+        codes: list[int] = []
+        cur = b""
+        for b in raw_data:
+            nxt = cur + bytes([b])
+            if nxt in enc_table:
+                cur = nxt
+            else:
+                codes.append(enc_table[cur])
+                if enc_next < 0x4000:
+                    enc_table[nxt] = enc_next
+                    enc_next += 1
+                cur = bytes([b])
+        if cur:
+            codes.append(enc_table[cur])
+        return b"".join(c.to_bytes(2, "big") for c in codes)
+
+    # Pre-build stateful battle tick packets 0..80 so overlap ticks reuse identical LZW bytes.
+    tick_chat_map = {
+        20: [make_ev06_item(0x11, 2, "hello before switch", "999001-2000-1")],
+        38: [make_ev06_item(0x11, 2, "during overlap", "999001-2000-2")],
+        60: [make_ev06_item(0x20, 3, "after switch", "999001-3000-3")],
+    }
+    tick_records: list[bytes] = []
+    for tidx in range(81):
+        enc_bytes = enc_lzw(make_tick_item_list(tick_chat_map.get(tidx, [])))
+        ip_pkt = _build_udp_ipv4_packet("2.2.2.2", 5509, "10.0.0.1", 40000, _make_030146_lzw_packet(conv, tidx, enc_bytes))
+        tick_records.append(_pcap_record(100 + tidx, 0, ip_pkt))
+
+    out_1001 = b"\x70\x00" + _encode_varint(1001) + b"\x70\x00" + _encode_varint(1000) + b"\x80\x80"
+    roster_1203 = make_roster_msg(
+        1203,
+        [(1000, 1, 0, "HostMe", 17), (2000, 1, 1, "AllyBob", 55), (3000, 2, 0, "EnemyFoe", 88)],
+    )
+    init_records = (
+        _pcap_header(LINKTYPE_RAW)
+        + _pcap_record(90, 0, _build_udp_ipv4_packet("10.0.0.1", 40000, "2.2.2.2", 5509, make_kcp_seg(conv, 0, out_1001)))
+        + _pcap_record(91, 0, _build_udp_ipv4_packet("2.2.2.2", 5509, "10.0.0.1", 40000, make_kcp_seg(conv, 0, roster_1203)))
+    )
+
+    spawned: list[tuple[str, _FakePipeProc]] = []
+
+    def fake_popen(cmd, stdout=None, stderr=None, bufsize=0):  # noqa: ARG001
+        serial = cmd[cmd.index("-s") + 1]
+        proc = _FakePipeProc()
+        spawned.append((serial, proc))
+        return proc
+
+    monkeypatch.setattr(ingest_mod.subprocess, "Popen", fake_popen)
+
+    # 1) Make-before-break ADB hot-switch: 0 gaps, 0 LZW errors, 0 duplicate chat, intact roster & tee file.
+    tr = TemplateResolver(tmpl_file)
+    store = MatchStore()
+    router = SessionRouter(store=store, templates=tr)
+    ingest = IngestController(
+        router=router,
+        store=store,
+        captures_dir=caps_dir,
+        adb_path=adb_exe,
+        handoff_overlap_seconds=0.15,
+    )
+    ingest.start_adb("RRCY1032Y6F", tee=True)
+    proc_usb = spawned[-1][1]
+    proc_usb.feed_bytes(init_records + b"".join(tick_records[:41]))
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        ms = store.get_matches()
+        if ms and ms[0].battle.decoded_ticks >= 41:
+            break
+        time.sleep(0.02)
+    assert store.get_matches()[0].battle.decoded_ticks == 41
+
+    # Switch to Wireless ADB while USB is still open, then overlap ticks 35..40 and feed 41..80 on Wi-Fi.
+    ingest.start_adb("192.168.1.17:36125", tee=True, preserve_session=True)
+    assert store.get_status()["switching_to"] == "192.168.1.17:36125"
+    proc_wifi = spawned[-1][1]
+    proc_wifi.feed_bytes(_pcap_header(LINKTYPE_RAW) + b"".join(tick_records[35:81]))
+    proc_usb.feed_bytes(b"".join(tick_records[41:46]))
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        st = store.get_status()
+        ms = store.get_matches()
+        if st["active_serial"] == "192.168.1.17:36125" and st["switching_to"] is None and ms and ms[0].battle.decoded_ticks >= 81:
+            break
+        time.sleep(0.02)
+
+    ingest.stop()
+    ms = store.get_matches()
+    assert len(ms) == 1
+    m = ms[0]
+    assert m.battle_id == "999001"
+    assert m.gaps == []
+    assert m.battle.lzw_errors == 0
+    assert m.battle.decoded_ticks == 81
+    assert [(ev.raw_text, ev.sender_name, ev.sender_hero, ev.side) for ev in m.events] == [
+        ("hello before switch", "AllyBob", "Angela", "ALLY"),
+        ("during overlap", "AllyBob", "Angela", "ALLY"),
+        ("after switch", "EnemyFoe", "Masha", "ENEMY"),
+    ]
+    tee_files = sorted(caps_dir.glob("live_*.pcap"))
+    assert len(tee_files) == 1 and tee_files[0].stat().st_size > 100
+    re_store, _, _ = _decode_pcap_whole(tee_files[0], templates_path=tmpl_file)
+    assert len(re_store.get_matches()[0].events) == 3
+
+    # 2) Failed hot-switch keeps old stream alive with clear error.
+    ingest.start_adb("RRCY1032Y6F", tee=False)
+    proc_usb2 = spawned[-1][1]
+    proc_usb2.feed_bytes(init_records + tick_records[0])
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline and not store.get_matches():
+        time.sleep(0.02)
+
+    ingest.start_adb("192.168.1.99:5555", tee=False, preserve_session=True)
+    proc_bad = spawned[-1][1]
+    proc_bad.feed_bytes(b"BAD!")
+    proc_bad.close_writer(1)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        st = store.get_status()
+        if st["switching_to"] is None and st["last_error"]:
+            break
+        time.sleep(0.02)
+    st_after_fail = store.get_status()
+    assert st_after_fail["capture_alive"] is True
+    assert st_after_fail["active_serial"] == "RRCY1032Y6F"
+    assert "Switch to 192.168.1.99:5555 failed" in (st_after_fail["last_error"] or "")
+    ingest.stop()
+
+    # Session-preserving resume after stop keeps existing players/events without resetting match_id.
+    ingest.start_adb("192.168.1.17:36125", tee=False, preserve_session=True)
+    proc_resume = spawned[-1][1]
+    proc_resume.feed_bytes(_pcap_header(LINKTYPE_RAW) + tick_records[1])
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        ms_res = store.get_matches()
+        if ms_res and ms_res[0].battle.decoded_ticks >= 2:
+            break
+        time.sleep(0.02)
+    assert len(store.get_matches()) == 1
+    assert store.get_matches()[0].players_by_uid[2000].name == "AllyBob"
+    assert store.get_matches()[0].battle.decoded_ticks >= 2
+    ingest.stop()
+
+    # 3) Cluster merge + roster/UID name recovery across split captures & restarted live streams.
+    hist_dir = tmp_path / "hist"
+    split_caps = tmp_path / "split_caps"
+    split_caps.mkdir()
+    seeded_live = {
+        "live:older999": {
+            "game_id": "live:older999",
+            "origin": "live",
+            "source_name": "Live capture",
+            "battle_id": "older999",
+            "server_ip": "3.3.3.3",
+            "server_port": 5005,
+            "first_ts": 500.0,
+            "last_ts": 510.0,
+            "players": [{"uid": 999001, "name": "KnownOldFriend", "camp": 1, "seat": 2, "slot": 18}],
+            "events": [{"seq_id": 1, "ts": 505.0, "phase": "draft", "channel": 4, "slot": 18, "sender_uid": 999001, "sender_name": "KnownOldFriend", "side": "ALLY", "raw_text": "hi", "display_text": "hi", "is_template": False}],
+            "gaps": [],
+        },
+        "live:888877776666:draft": {
+            "game_id": "live:888877776666:draft",
+            "origin": "live",
+            "source_name": "Live capture",
+            "battle_id": None,
+            "server_ip": "4.4.4.4",
+            "server_port": 5505,
+            "first_ts": 1000.0,
+            "last_ts": 1020.0,
+            "local_uid": 1000,
+            "local_camp": 1,
+            "players": [
+                {"uid": 1000, "name": "HostMe", "camp": 1, "seat": 0, "slot": 0x10, "hero_id": 17, "hero_name": "Fanny"},
+                {"uid": 2000, "name": "BuddyOne", "camp": 1, "seat": 1, "slot": 0x11, "hero_id": 55, "hero_name": "Angela"},
+                {"uid": 3000, "name": "RivalOne", "camp": 2, "seat": 0, "slot": 0x20, "hero_id": 88, "hero_name": "Masha"},
+            ],
+            "events": [
+                {"seq_id": 1, "ts": 1010.0, "phase": "draft", "channel": 4, "slot": 0x11, "camp": 1, "sender_uid": 2000, "sender_name": "BuddyOne", "sender_hero_id": 55, "sender_hero": "Angela", "side": "ALLY", "raw_text": "draft gl", "display_text": "draft gl", "is_template": False, "msg_uid": ""},
+            ],
+            "gaps": [],
+        },
+        "live:888877776666": {
+            "game_id": "live:888877776666",
+            "origin": "live",
+            "source_name": "Live capture",
+            "battle_id": "888877776666",
+            "server_ip": "4.4.4.4",
+            "server_port": 5505,
+            "first_ts": 1003.0,
+            "last_ts": 1200.0,
+            "players": [],
+            "events": [
+                {"seq_id": 1, "ts": 1100.0, "phase": "battle", "tick": 500, "channel": 2, "slot": 0x11, "camp": 1, "sender_uid": None, "sender_name": "slot 0x11", "side": "CAMP 1", "raw_text": "early msg", "display_text": "early msg", "is_template": False, "msg_uid": ""},
+                {"seq_id": 2, "ts": 1120.0, "phase": "battle", "tick": 600, "channel": 2, "slot": 0x11, "camp": 1, "sender_uid": 2000, "sender_name": "uid:2000", "side": "CAMP 1", "raw_text": "late msg", "display_text": "late msg", "is_template": False, "msg_uid": "888877776666-2000-2"},
+                {"seq_id": 3, "ts": 1130.0, "phase": "battle", "tick": 650, "channel": 3, "slot": 0x23, "camp": 2, "sender_uid": 999001, "sender_name": "uid:999001", "side": "CAMP 2", "raw_text": "old friend", "display_text": "old friend", "is_template": False, "msg_uid": "888877776666-999001-3"},
+            ],
+            "gaps": [],
+        },
+    }
+    hist_dir.mkdir()
+    (hist_dir / "live_games.json").write_text(json.dumps({"version": 1, "games": seeded_live}), encoding="utf-8")
+
+    hist = MatchHistoryStore(captures_dir=split_caps, history_dir=hist_dir, templates=tr)
+    listed = hist.list_games(include_empty=False)["games"]
+    assert len(listed) == 2
+    merged_game = hist.get_game("live:888877776666")
+    assert merged_game is not None
+    assert merged_game["summary"]["ally_players"] == ["HostMe", "BuddyOne"]
+    assert [(e["raw_text"], e["sender_name"], e["side"]) for e in merged_game["events"]] == [
+        ("draft gl", "BuddyOne", "ALLY"),
+        ("early msg", "BuddyOne", "ALLY"),
+        ("late msg", "BuddyOne", "ALLY"),
+        ("old friend", "KnownOldFriend", "ENEMY"),
+    ]
+
+    # Live mid-battle SessionRouter hydrated from MatchHistoryStore resolves both slot 0x11 backfill and KnownOldFriend.
+    mid_store = MatchStore()
+    mid_router = SessionRouter(
+        store=mid_store,
+        templates=tr,
+        match_roster_lookup=hist.lookup_match_roster,
+        uid_name_lookup=hist.lookup_player_name,
+    )
+    mid_enc_table = {bytes([i]): i for i in range(256)}
+    mid_codes: list[int] = []
+    cur = b""
+    for b in make_tick_item_list(
+        [
+            make_ev06_item(0x11, 2, "early slot"),
+            make_ev06_item(0x23, 3, "from old friend", "888877776666-999001-4"),
+            make_ev06_item(0x11, 2, "from buddy", "888877776666-2000-5"),
+        ]
+    ):
+        nxt = cur + bytes([b])
+        if nxt in mid_enc_table:
+            cur = nxt
+        else:
+            mid_codes.append(mid_enc_table[cur])
+            cur = bytes([b])
+    if cur:
+        mid_codes.append(mid_enc_table[cur])
+    mid_pkt = _build_udp_ipv4_packet(
+        "4.4.4.4", 5505, "10.0.0.1", 40000, _make_030146_lzw_packet(conv, 0, b"".join(c.to_bytes(2, "big") for c in mid_codes))
+    )
+    for pkt in IncrementalPcapReader().feed(_pcap_header(LINKTYPE_RAW) + _pcap_record(2000, 0, mid_pkt)):
+        mid_router.on_packet(pkt)
+    m_restarted = mid_store.get_matches()[0]
+    assert [(ev.raw_text, ev.sender_name, ev.side) for ev in m_restarted.events] == [
+        ("early slot", "BuddyOne", "ALLY"),
+        ("from old friend", "KnownOldFriend", "ENEMY"),
+        ("from buddy", "BuddyOne", "ALLY"),
+    ]
+
+    # If real split captures from 17:25 + 17:28 exist on disk, verify merging yields all 10 names & heroes.
+    cap_1725 = CAPTURES_DIR / "live_20261127_172543.pcap"
+    cap_1728 = CAPTURES_DIR / "live_lag_20261127_172850.pcap"
+    real_tmpl = REPO_ROOT / "data" / "chat_templates.json"
+    if cap_1725.is_file() and cap_1728.is_file() and real_tmpl.is_file():
+        real_caps = tmp_path / "real_1725"
+        real_caps.mkdir()
+        shutil.copyfile(cap_1725, real_caps / cap_1725.name)
+        shutil.copyfile(cap_1728, real_caps / cap_1728.name)
+        real_hist = MatchHistoryStore(captures_dir=real_caps, history_dir=tmp_path / "real_hist", templates=TemplateResolver(real_tmpl))
+        real_hist.start_background_scan()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            r_l = real_hist.list_games(include_empty=False)
+            if not r_l["scan"]["scanning"] and r_l["games"]:
+                break
+            time.sleep(0.05)
+        g_829 = [g for g in real_hist.list_games()["games"] if g.get("battle_id") == "829733665579293409"]
+        assert len(g_829) == 1
+        assert "Chudvial999" in g_829[0]["ally_players"] or "Chudvial999" in g_829[0]["enemy_players"]
+
+    # 4) Clear source mode, /api/adb/wireless error check, and UI control HTML.
+    app = create_app(
+        captures_dir=caps_dir,
+        templates_path=tmpl_file,
+        history_dir=tmp_path / "ui_hist",
+        adb_path=adb_exe,
+        auto_scan_history=False,
+    )
+    with TestClient(app) as client:
+        assert client.post("/api/source", json={"mode": "clear"}).status_code == 200
+        assert client.post("/api/adb/wireless", json={"action": "bogus"}).status_code == 400
+        html = client.get("/").text
+        for needle in ("btnSwitchDevice", "btnConnectWireless", "btnClearSession", "switch_adb", "preserve_session", "/api/adb/wireless"):
+            assert needle in html
+
+
+
 
 
 
