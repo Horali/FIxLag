@@ -15,7 +15,7 @@ from .templates import TemplateResolver
 
 DEFAULT_HISTORY_DIR = Path(__file__).resolve().parents[2] / "data" / "chat_history"
 MIN_PCAP_BYTES = 100
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

@@ -62,12 +62,18 @@ def extract_ticks_from_subframe(subframe: bytes) -> list[tuple[int, str, bytes |
     else:
         seq = 0
 
-    # Field 0x01 is a varint (can be multi-byte, e.g. 386 in draft_DRAFT tick 2328).
+    # Field 0x01 packs 7-bit tick offsets for extra fields (0x43..0x46 / 0x53..0x56):
+    # e.g. 386 (0x82 0x03) -> [2, 3], 82434 (0x82 0x84 0x05) -> [2, 4, 5].
+    deltas: list[int] = [0]
     if pos < len(inner) and inner[pos] == 0x01:
         try:
-            _, pos = read_varint(inner, pos + 1)
+            v1, pos = read_varint(inner, pos + 1)
         except ValueError:
             return []
+        x = v1
+        while x > 0:
+            deltas.append(x & 0x7F)
+            x >>= 7
 
     ticks: list[tuple[int, str, bytes | list[object]]] = []
     while pos < len(inner) and inner[pos] != 0x80:
@@ -80,7 +86,9 @@ def extract_ticks_from_subframe(subframe: bytes) -> list[tuple[int, str, bytes |
                 break
             if pos + flen > len(inner):
                 break
-            ticks.append((seq + (tag - 0x42), "lzw", inner[pos : pos + flen]))
+            slot_i = tag - 0x42
+            offset = deltas[slot_i] if slot_i < len(deltas) else slot_i
+            ticks.append((seq + offset, "lzw", inner[pos : pos + flen]))
             pos += flen
         elif 0x52 <= tag <= 0x56:
             try:
@@ -125,7 +133,9 @@ def extract_ticks_from_subframe(subframe: bytes) -> list[tuple[int, str, bytes |
                     break
             if not ok:
                 break
-            ticks.append((seq + (tag - 0x52), "raw", items))
+            slot_i = tag - 0x52
+            offset = deltas[slot_i] if slot_i < len(deltas) else slot_i
+            ticks.append((seq + offset, "raw", items))
         else:
             break
     return ticks
@@ -190,6 +200,7 @@ class TickEventOutput:
     gap_to: int | None = None
     sync_tick: int | None = None
     message: str = ""
+    reason: str = "mid_match"
 
 
 class BattleTickProcessor:
@@ -206,6 +217,7 @@ class BattleTickProcessor:
         self.lzw_errors = 0
         self.session_reset_count = 0
         self.blind_from: int | None = None
+        self._gap_reason: str = "mid_match"
         self._candidate_sync_tick: int | None = None
         self._candidate_suffix_events: list[dict[str, object]] = []
         self._seen_raw_ticks: set[int] = set()
@@ -217,6 +229,7 @@ class BattleTickProcessor:
         self._seen_raw_ticks.clear()
         self.next_tick = None
         self.blind_from = None
+        self._gap_reason = "mid_match"
         self._candidate_sync_tick = None
         self._candidate_suffix_events.clear()
         self.fsm_state = "IDLE"
@@ -252,6 +265,7 @@ class BattleTickProcessor:
             else:
                 self.fsm_state = "WAIT_CLEAR"
                 self.blind_from = tick_idx
+                self._gap_reason = "mid_match"
                 outputs.append(
                     TickEventOutput(
                         kind="gap_open",
@@ -259,6 +273,7 @@ class BattleTickProcessor:
                         ts=ts,
                         gap_from=tick_idx,
                         message=f"Cannot decode battle chat before next LZW reset (from tick {tick_idx})",
+                        reason="mid_match",
                     )
                 )
 
@@ -277,6 +292,7 @@ class BattleTickProcessor:
                     self.next_tick = future_ticks[0]
                 self.fsm_state = "WAIT_CLEAR"
                 self.blind_from = gap_start
+                self._gap_reason = "packet_loss"
                 self._candidate_sync_tick = None
                 self._candidate_suffix_events.clear()
                 outputs.append(
@@ -285,7 +301,8 @@ class BattleTickProcessor:
                         tick=gap_start,
                         ts=ts,
                         gap_from=gap_start,
-                        message=f"Cannot decode battle chat before next LZW reset (from tick {gap_start})",
+                        message=f"Missed battle packets before next LZW reset (from tick {gap_start})",
+                        reason="packet_loss",
                     )
                 )
         elif (
@@ -343,6 +360,7 @@ class BattleTickProcessor:
                 self.lzw_errors += 1
                 self.fsm_state = "WAIT_CLEAR"
                 self.blind_from = t
+                self._gap_reason = "desync"
                 self._candidate_sync_tick = None
                 self._candidate_suffix_events.clear()
                 outputs.append(
@@ -352,6 +370,7 @@ class BattleTickProcessor:
                         ts=ts,
                         gap_from=t,
                         message=f"LZW desync at tick {t} ({exc}); waiting for next LZW reset",
+                        reason="desync",
                     )
                 )
                 continue
@@ -413,6 +432,7 @@ class BattleTickProcessor:
                 gap_to=gap_to,
                 sync_tick=sync_tick,
                 message=f"Cannot decode battle chat before next LZW reset (ticks {gap_from}..{gap_to}; resynced at tick {sync_tick})",
+                reason=self._gap_reason,
             )
         )
         if self._candidate_suffix_events:
