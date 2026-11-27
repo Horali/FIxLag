@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,6 +32,41 @@ def validate_loopback_host(host: str) -> str:
     if host != LOOPBACK_HOST:
         raise ValueError(f"Refusing non-loopback bind host {host!r}; only '127.0.0.1' is allowed")
     return host
+
+
+def _can_bind_loopback(port: int) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        sock.bind((LOOPBACK_HOST, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def pick_loopback_port(
+    preferred_port: int = DEFAULT_PORT,
+    *,
+    allow_fallback: bool = True,
+    max_tries: int = 20,
+) -> int:
+    """Return *preferred_port* if free on `127.0.0.1`, else probe subsequent ports when allowed."""
+    if not (1 <= preferred_port <= 65535):
+        raise ValueError(f"Port must be in 1..65535, got {preferred_port}")
+    if _can_bind_loopback(preferred_port):
+        return preferred_port
+    if not allow_fallback:
+        raise OSError(f"Port {preferred_port} is already in use on {LOOPBACK_HOST}")
+    for offset in range(1, max(1, max_tries)):
+        candidate = preferred_port + offset
+        if candidate > 65535:
+            break
+        if _can_bind_loopback(candidate):
+            return candidate
+    raise OSError(f"No free loopback port found near {preferred_port} on {LOOPBACK_HOST}")
 
 
 def _format_sse(event_id: int, event_name: str, data: dict[str, Any]) -> str:

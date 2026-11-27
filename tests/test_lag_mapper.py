@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import random
 import shutil
+import socket
 import struct
 import sys
 import time
@@ -30,7 +31,7 @@ from tools.lag_mapper.classifier import classify_ip
 from tools.lag_mapper.detector import LagPacketEngine
 from tools.lag_mapper.pcap_net import IncrementalNetPcapReader, classify_link
 from tools.lag_mapper.rtt import RttTracker
-from tools.lag_mapper.server import create_app, validate_loopback_host
+from tools.lag_mapper.server import create_app, pick_loopback_port, validate_loopback_host
 from tools.lag_mapper.tcp_lobby import TcpLobbyDecoder, redact_pii
 
 CAPTURES_DIR = REPO_ROOT / "captures"
@@ -491,3 +492,19 @@ def test_7_http_sse_api_and_loopback_guard(tmp_path: Path) -> None:
         r_stop = client.post("/api/source", json={"mode": "stop"})
         assert r_stop.status_code == 200
         assert r_stop.json()["status"]["source_mode"] == "IDLE"
+
+
+def test_8_pick_loopback_port_fallback() -> None:
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    try:
+        busy_port = blocker.getsockname()[1]
+        with pytest.raises(OSError):
+            pick_loopback_port(busy_port, allow_fallback=False)
+        fallback = pick_loopback_port(busy_port, allow_fallback=True)
+        assert fallback != busy_port
+        assert fallback > busy_port
+        assert pick_loopback_port(fallback, allow_fallback=False) == fallback
+    finally:
+        blocker.close()
