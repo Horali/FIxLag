@@ -22,6 +22,7 @@ from .aggregator import DEFAULT_CAPTURES_DIR, DEFAULT_DATA_DIR, LagAggregator
 from .classifier import CITY_CLUSTERS
 from .ingest import LagIngestController, LiveStore, list_adb_devices
 from .ui import INDEX_HTML
+from .wireless_adb import TRUSTED_SSIDS, disable_wireless_adb, ensure_wireless_adb
 
 LOOPBACK_HOST = "127.0.0.1"
 DEFAULT_PORT = 8766
@@ -142,6 +143,29 @@ def create_app(
 
     async def api_devices(_request: Request) -> JSONResponse:
         return JSONResponse({"devices": list_adb_devices(adb_path)})
+
+    async def api_adb_wireless(request: Request) -> JSONResponse:
+        body: dict[str, Any] = {}
+        try:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+        except ValueError:
+            body = {}
+
+        action = str(body.get("action") or "connect").strip().lower()
+        if action == "connect":
+            res = await asyncio.to_thread(ensure_wireless_adb, adb_path)
+            return JSONResponse(res)
+        if action == "disable":
+            raw_serial = body.get("serial")
+            serial_arg = str(raw_serial).strip() if raw_serial else None
+            res = await asyncio.to_thread(disable_wireless_adb, adb_path, serial=serial_arg)
+            return JSONResponse(res)
+        return JSONResponse(
+            {"error": f"Unknown wireless action {action!r}", "trusted_ssids": list(TRUSTED_SSIDS)},
+            status_code=400,
+        )
 
     async def api_source(request: Request) -> JSONResponse:
         try:
@@ -322,6 +346,7 @@ def create_app(
             Route("/api/live/packets", api_live_packets, methods=["GET"]),
             Route("/api/pcaps", api_pcaps, methods=["GET"]),
             Route("/api/devices", api_devices, methods=["GET"]),
+            Route("/api/adb/wireless", api_adb_wireless, methods=["POST"]),
             Route("/api/source", api_source, methods=["POST"]),
             Route("/api/notes", api_notes, methods=["POST"]),
             Route("/api/rescan", api_rescan, methods=["POST"]),

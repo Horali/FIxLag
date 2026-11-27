@@ -508,3 +508,157 @@ def test_8_pick_loopback_port_fallback() -> None:
         assert pick_loopback_port(fallback, allow_fallback=False) == fallback
     finally:
         blocker.close()
+
+
+def test_9_wireless_adb_trusted_ssid_and_usb_handoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tools.lag_mapper import server as srv_mod
+    from tools.lag_mapper import wireless_adb as wadb
+
+    sample_pribadi = """
+    Name                   : Wi-Fi
+    State                  : connected
+    SSID                   : Pribadi
+    AP BSSID               : ec:e7:a2:43:5f:48
+    """
+    sample_disconn = """
+    Name                   : Wi-Fi
+    State                  : disconnected
+    """
+    assert wadb.parse_netsh_ssid(sample_pribadi) == "Pribadi"
+    assert wadb.parse_netsh_ssid(sample_disconn) is None
+    assert wadb.is_trusted_wifi("Kos gk atas") is True
+    assert wadb.is_trusted_wifi("Pribadi") is True
+    assert wadb.is_trusted_wifi("myITS-WiFi") is False
+    assert wadb.is_trusted_wifi("ITS-WIFI1-5G") is False
+    assert wadb.is_trusted_wifi(None) is False
+
+    fake_adb = tmp_path / "adb.exe"
+    fake_adb.write_text("", encoding="utf-8")
+
+    # 1. Untrusted Wi-Fi must never call adb connect or settings put.
+    adb_calls: list[list[str]] = []
+    monkeypatch.setattr(wadb, "find_adb", lambda _=None: fake_adb)
+    monkeypatch.setattr(wadb, "get_current_wifi_ssid", lambda: "myITS-WiFi")
+    monkeypatch.setattr(
+        wadb,
+        "list_adb_devices",
+        lambda _adb=None: [{"serial": "RRCY1032Y6F", "state": "device", "model": "SM_S936B"}],
+    )
+    monkeypatch.setattr(
+        wadb.subprocess,
+        "run",
+        lambda cmd, **_kw: adb_calls.append(list(cmd)) or type("P", (), {"returncode": 0, "stdout": ""})(),
+    )
+    res_untrusted = wadb.ensure_wireless_adb(fake_adb)
+    assert res_untrusted["ok"] is False
+    assert res_untrusted["trusted_wifi"] is False
+    assert adb_calls == []
+
+    # 2. Trusted Wi-Fi ("Pribadi") prefers TLS _adb-tls-connect._tcp over _adb._tcp.
+    adb_calls.clear()
+    connected_eps: set[str] = set()
+    mdns_stdout = (
+        "List of discovered mdns services\n"
+        "adb-RRCY1032Y6F-Wj1Car\t_adb._tcp\t192.168.1.6:5555\n"
+        "adb-RRCY1032Y6F-Wj1Car\t_adb-tls-connect._tcp\t192.168.1.6:38605\n"
+    )
+    monkeypatch.setattr(wadb, "get_current_wifi_ssid", lambda: "Pribadi")
+
+    def fake_devices_tls(_adb=None):
+        devs = [{"serial": "RRCY1032Y6F", "state": "device", "model": "SM_S936B"}]
+        for ep in sorted(connected_eps):
+            devs.append({"serial": ep, "state": "device", "model": "SM_S936B"})
+        return devs
+
+    def fake_run_tls(cmd, **_kw):
+        adb_calls.append(list(cmd))
+        if cmd[1:3] == ["mdns", "services"]:
+            return type("P", (), {"returncode": 0, "stdout": mdns_stdout})()
+        if cmd[1] == "connect":
+            connected_eps.add(cmd[2])
+            return type("P", (), {"returncode": 0, "stdout": f"connected to {cmd[2]}"})()
+        return type("P", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr(wadb, "list_adb_devices", fake_devices_tls)
+    monkeypatch.setattr(wadb.subprocess, "run", fake_run_tls)
+    res_tls = wadb.ensure_wireless_adb(fake_adb)
+    assert res_tls["ok"] is True
+    assert res_tls["safe_to_unplug"] is True
+    assert res_tls["connected"] == ["192.168.1.6:38605"]
+    assert any(c[1:3] == ["connect", "192.168.1.6:38605"] for c in adb_calls)
+    assert not any(c[1:3] == ["connect", "192.168.1.6:5555"] for c in adb_calls)
+
+    # 3. USB handoff on "Kos gk atas" enables adb_wifi_enabled=1 and connects newly advertised TLS port.
+    adb_calls.clear()
+    connected_eps.clear()
+    wifi_enabled = {"on": False}
+    monkeypatch.setattr(wadb, "get_current_wifi_ssid", lambda: "Kos gk atas")
+
+    def fake_run_handoff(cmd, **_kw):
+        adb_calls.append(list(cmd))
+        if "adb_wifi_enabled" in cmd:
+            wifi_enabled["on"] = cmd[-1] == "1"
+            return type("P", (), {"returncode": 0, "stdout": ""})()
+        if cmd[1:3] == ["mdns", "services"]:
+            out = (
+                "adb-RRCY1032Y6F-Wj1Car\t_adb-tls-connect._tcp\t192.168.1.8:40123\n"
+                if wifi_enabled["on"]
+                else "List of discovered mdns services\n"
+            )
+            return type("P", (), {"returncode": 0, "stdout": out})()
+        if cmd[1] == "connect":
+            connected_eps.add(cmd[2])
+            return type("P", (), {"returncode": 0, "stdout": f"connected to {cmd[2]}"})()
+        return type("P", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr(wadb.subprocess, "run", fake_run_handoff)
+    res_handoff = wadb.ensure_wireless_adb(fake_adb, poll_seconds=0.1, poll_interval=0.01)
+    assert res_handoff["ok"] is True
+    assert res_handoff["connected"] == ["192.168.1.8:40123"]
+    assert any("adb_wifi_enabled" in c and c[-1] == "1" for c in adb_calls)
+
+    # 4. HTTP endpoint POST /api/adb/wireless.
+    caps = tmp_path / "caps"
+    data = tmp_path / "data"
+    caps.mkdir()
+    data.mkdir()
+    monkeypatch.setattr(
+        srv_mod,
+        "ensure_wireless_adb",
+        lambda _adb=None: {
+            "ok": True,
+            "trusted_wifi": True,
+            "ssid": "Pribadi",
+            "trusted_ssids": ["Kos gk atas", "Pribadi"],
+            "connected": ["192.168.1.6:38605"],
+            "usb_devices": ["RRCY1032Y6F"],
+            "safe_to_unplug": True,
+            "devices": [{"serial": "192.168.1.6:38605", "state": "device", "model": "SM_S936B"}],
+            "message": "connected",
+        },
+    )
+    monkeypatch.setattr(
+        srv_mod,
+        "disable_wireless_adb",
+        lambda _adb=None, serial=None: {
+            "ok": True,
+            "trusted_wifi": True,
+            "ssid": "Pribadi",
+            "trusted_ssids": ["Kos gk atas", "Pribadi"],
+            "connected": [],
+            "safe_to_unplug": False,
+            "devices": [],
+            "message": "Wireless ADB disabled",
+        },
+    )
+    app = create_app(captures_dir=caps, data_dir=data, auto_scan=False)
+    with TestClient(app) as client:
+        r_conn = client.post("/api/adb/wireless", json={"action": "connect"})
+        assert r_conn.status_code == 200
+        assert r_conn.json()["connected"] == ["192.168.1.6:38605"]
+        r_dis = client.post("/api/adb/wireless", json={"action": "disable"})
+        assert r_dis.status_code == 200
+        assert r_dis.json()["ok"] is True
+        assert client.post("/api/adb/wireless", json={"action": "bad"}).status_code == 400

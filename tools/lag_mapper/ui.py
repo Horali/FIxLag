@@ -296,6 +296,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="source-group">
           <select id="adb-select" style="min-width:190px;"><option value="">No ADB devices</option></select>
           <button id="refresh-devices-btn">Refresh ADB</button>
+          <button id="auto-wireless-btn" title="Auto-connect Wireless ADB on Kos gk atas or Pribadi">Auto Wireless</button>
+          <button id="wireless-off-btn" title="Turn off Wireless Debugging on the phone">Wireless Off</button>
           <label class="chk"><input type="checkbox" id="adb-tee-chk" checked> Tee .pcap</label>
           <button class="primary" id="start-adb-btn">Start ADB Live</button>
         </div>
@@ -305,6 +307,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
           <button class="primary" id="start-pcap-btn">Replay PCAP</button>
           <button class="danger" id="stop-source-btn">Stop</button>
         </div>
+        <span id="wireless-status-pill" class="pill" style="display:none;"></span>
         <span id="source-err" class="pill err" style="display:none;"></span>
       </div>
     </div>
@@ -1084,6 +1087,49 @@ INDEX_HTML = r"""<!DOCTYPE html>
     }
   }
 
+  function renderDeviceOptions(dList) {
+    const dSel = document.getElementById("adb-select");
+    const prev = dSel.value;
+    dSel.innerHTML = dList.length
+      ? dList.map((d) => {
+          const kind = d.serial.includes(":") ? "Wi-Fi" : "USB";
+          return `<option value="${esc(d.serial)}">${esc(d.serial)} (${esc(kind)} · ${esc(d.model || d.state)})</option>`;
+        }).join("")
+      : `<option value="">No ADB devices</option>`;
+    if (!dList.length) return;
+    const wirelessDev = dList.find((d) => d.state === "device" && d.serial.includes(":"));
+    if (prev && prev.includes(":") && dList.some((d) => d.serial === prev)) {
+      dSel.value = prev;
+    } else if (wirelessDev) {
+      dSel.value = wirelessDev.serial;
+    } else if (prev && dList.some((d) => d.serial === prev)) {
+      dSel.value = prev;
+    }
+  }
+
+  function renderWirelessStatus(res) {
+    const pill = document.getElementById("wireless-status-pill");
+    if (!res || !res.message) {
+      pill.style.display = "none";
+      return;
+    }
+    pill.style.display = "inline-flex";
+    pill.textContent = res.message;
+    pill.className = "pill " + (res.ok && res.safe_to_unplug ? "ok" : (!res.trusted_wifi ? "warn" : "info"));
+  }
+
+  async function runWirelessAction(action) {
+    try {
+      const res = await apiPost("/api/adb/wireless", { action });
+      renderWirelessStatus(res);
+      if (Array.isArray(res.devices)) {
+        renderDeviceOptions(res.devices);
+      }
+    } catch (_err) {
+      // Ignore transient startup check errors
+    }
+  }
+
   async function refreshSources() {
     try {
       const [pcaps, devs] = await Promise.all([apiGet("/api/pcaps"), apiGet("/api/devices")]);
@@ -1095,11 +1141,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         : `<option value="">No .pcap files in captures/</option>`;
       if (curP && pList.some((p) => p.path === curP)) pSel.value = curP;
 
-      const dSel = document.getElementById("adb-select");
-      const dList = devs.devices || [];
-      dSel.innerHTML = dList.length
-        ? dList.map((d) => `<option value="${esc(d.serial)}">${esc(d.serial)} (${esc(d.model || d.state)})</option>`).join("")
-        : `<option value="">No ADB devices</option>`;
+      renderDeviceOptions(devs.devices || []);
     } catch (_err) {
       // Ignore transient startup refresh error
     }
@@ -1132,6 +1174,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   });
 
   document.getElementById("refresh-devices-btn").addEventListener("click", refreshSources);
+  document.getElementById("auto-wireless-btn").addEventListener("click", () => runWirelessAction("connect"));
+  document.getElementById("wireless-off-btn").addEventListener("click", () => runWirelessAction("disable"));
 
   function showSourceError(msg) {
     const el = document.getElementById("source-err");
@@ -1290,7 +1334,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   refreshAllData();
-  refreshSources();
+  refreshSources().then(() => runWirelessAction("connect"));
   connectSse();
 })();
 </script>
