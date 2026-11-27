@@ -1410,7 +1410,7 @@ def test_15_history_dedup_and_dynamic_live_updates(tmp_path: Path) -> None:
 def test_16_early_roster_1230_1242_mode_party_and_bots(tmp_path: Path) -> None:
     from tools.chat_viewer.history import CACHE_SCHEMA_VERSION
 
-    assert CACHE_SCHEMA_VERSION == 5
+    assert CACHE_SCHEMA_VERSION == 6
 
     # 1) Full draft_LIVE6.pcap: Ranked 5-stack, country distribution, metadata, zero anomalies.
     store_d6, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_LIVE6.pcap")
@@ -1536,6 +1536,83 @@ def test_16_early_roster_1230_1242_mode_party_and_bots(tmp_path: Path) -> None:
         assert ".chip-cc" in html
         assert ".chip-bot" in html
         assert ".mini-badge.mode" in html
+
+
+def test_17_packed_7bit_tick_deltas_and_gap_reasons(tmp_path: Path) -> None:
+    from tools.chat_viewer.battle import BattleTickProcessor, extract_ticks_from_subframe
+
+    def make_lzw_sub(seq: int, v1: int | None, fields: list[tuple[int, bytes]]) -> bytes:
+        inner = bytearray(b"\x70")
+        if seq != 0:
+            inner += b"\x00" + _encode_varint(seq)
+        if v1 is not None:
+            inner += b"\x01" + _encode_varint(v1)
+        for tag, pay in fields:
+            inner += bytes([tag]) + _encode_varint(len(pay)) + pay
+        inner += b"\x80"
+        return b"\x03\x01\x46" + _encode_varint(len(inner)) + bytes(inner)
+
+    assert [t for t, _, _ in extract_ticks_from_subframe(make_lzw_sub(10, 1, [(0x42, b"\x01\x01"), (0x43, b"\x01\x02")]))] == [10, 11]
+    assert [t for t, _, _ in extract_ticks_from_subframe(make_lzw_sub(0, 386, [(0x42, b"a"), (0x43, b"b"), (0x44, b"c")]))] == [0, 2, 3]
+    assert [t for t, _, _ in extract_ticks_from_subframe(make_lzw_sub(50, 515, [(0x42, b"a"), (0x43, b"b"), (0x44, b"c")]))] == [50, 53, 54]
+    assert [
+        t for t, _, _ in extract_ticks_from_subframe(make_lzw_sub(100, 82434, [(0x42, b"a"), (0x43, b"b"), (0x44, b"c"), (0x45, b"d")]))
+    ] == [100, 102, 104, 105]
+    assert [
+        t for t, _, _ in extract_ticks_from_subframe(make_lzw_sub(200, 115459, [(0x42, b"a"), (0x43, b"b"), (0x44, b"c"), (0x45, b"d")]))
+    ] == [200, 203, 206, 207]
+
+    # Sparse raw tick tag 0x55 with v1=82434 ([2, 4, 5]) resolves to seq + 5.
+    raw_inner = b"\x70\x00" + _encode_varint(300) + b"\x01" + _encode_varint(82434) + b"\x55\x00\x80"
+    raw_sub = b"\x03\x01\x46" + _encode_varint(len(raw_inner)) + raw_inner
+    assert extract_ticks_from_subframe(raw_sub) == [(305, "raw", [])]
+
+    # Gap reason: mid_match (first tick > 0, resolved with 0x0100 reset + empty next tick).
+    bp_mid = BattleTickProcessor()
+    o_mid = bp_mid.on_tick(1.0, 50, "lzw", b"\x01\x01")
+    assert o_mid[0].kind == "gap_open" and o_mid[0].reason == "mid_match"
+    bp_mid.on_tick(2.0, 130, "lzw", (0x0100).to_bytes(2, "big"))
+    o_mid_res = bp_mid.on_tick(3.0, 131, "lzw", _make_fake_lzw_uncompressed_words(b"\x70\x80"))
+    assert o_mid_res[0].kind == "gap_resolved" and o_mid_res[0].reason == "mid_match"
+
+    # Gap reason: packet_loss (synced at 0 then skip > 75 ticks).
+    bp_loss = BattleTickProcessor()
+    assert bp_loss.on_tick(1.0, 0, "lzw", _make_fake_lzw_uncompressed_words(b"\x70\x80")) == []
+    o_loss = bp_loss.on_tick(5.0, 80, "lzw", _make_fake_lzw_uncompressed_words(b"\x70\x80"))
+    assert o_loss[0].kind == "gap_open" and o_loss[0].reason == "packet_loss"
+    bp_loss.on_tick(6.0, 81, "lzw", (0x0100).to_bytes(2, "big"))
+    o_loss_res = bp_loss.on_tick(7.0, 82, "lzw", _make_fake_lzw_uncompressed_words(b"\x70\x80"))
+    assert o_loss_res[0].kind == "gap_resolved" and o_loss_res[0].reason == "packet_loss"
+
+    # Gap reason: desync (bad LZW code after tick 0).
+    bp_desync = BattleTickProcessor()
+    bp_desync.on_tick(1.0, 0, "lzw", _make_fake_lzw_uncompressed_words(b"\x70\x80"))
+    o_des = bp_desync.on_tick(2.0, 1, "lzw", (0x3FFE).to_bytes(2, "big"))
+    assert o_des[0].kind == "desync" and o_des[0].reason == "desync"
+
+    # Real capture live_20261127_101201.pcap decodes cleanly with zero gaps and zero LZW errors.
+    live_cap = CAPTURES_DIR / "live_20261127_101201.pcap"
+    if live_cap.is_file():
+        tmpl_arg = REPO_ROOT / "data" / "chat_templates.json"
+        store_1012, _, _ = _decode_pcap_whole(live_cap, templates_path=tmpl_arg if tmpl_arg.is_file() else None)
+        ms = store_1012.get_matches()
+        assert len(ms) == 1
+        m_1012 = ms[0]
+        assert m_1012.gaps == []
+        assert m_1012.battle.lzw_errors == 0
+        assert m_1012.battle.decoded_ticks >= 5000
+
+    app = create_app(
+        captures_dir=CAPTURES_DIR,
+        templates_path=tmp_path / "__missing__.json",
+        history_dir=tmp_path / "hist",
+        auto_scan_history=False,
+    )
+    with TestClient(app) as client:
+        html = client.get("/").text
+        assert "Missed packets" in html
+        assert "Stream resync" in html
+
 
 
 
