@@ -143,7 +143,183 @@ def _record_quality(rec: dict[str, Any]) -> tuple[int, int, int, int, float]:
     return (events_count, heroes_count, players_count, is_pcap, last_ts)
 
 
-def _dedup_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _is_real_player_name(name: Any) -> bool:
+    if not isinstance(name, str):
+        return False
+    s = name.strip()
+    return bool(s) and not s.startswith("uid:") and not s.startswith("slot 0x") and s != "unknown"
+
+
+def _event_dedup_key(ev: dict[str, Any]) -> tuple[Any, ...]:
+    phase = ev.get("phase") or ""
+    msg_uid = str(ev.get("msg_uid") or "")
+    if msg_uid:
+        return ("uid", phase, msg_uid)
+    tick = ev.get("tick")
+    ch = int(ev.get("channel") or 0)
+    slot = ev.get("slot")
+    raw_text = str(ev.get("raw_text") or "")
+    if tick is not None:
+        return ("tick", phase, tick, ch, slot, raw_text)
+    return ("ts", phase, round(float(ev.get("ts") or 0.0), 1), ch, slot, raw_text)
+
+
+def _merge_match_cluster(
+    cluster: list[dict[str, Any]],
+    uid_names: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    best = max(cluster, key=_record_quality)
+    merged = dict(best)
+    if len(cluster) == 1:
+        players = [dict(p) for p in (best.get("players") or []) if isinstance(p, dict)]
+        events = [dict(e) for e in (best.get("events") or []) if isinstance(e, dict)]
+        merged["players"] = players
+        merged["events"] = events
+        merged["gaps"] = [dict(g) for g in (best.get("gaps") or []) if isinstance(g, dict)]
+    else:
+        ordered = sorted(cluster, key=_record_quality)
+        merged["players"] = []
+        merged["events"] = []
+        merged["gaps"] = [dict(g) for g in (best.get("gaps") or []) if isinstance(g, dict)]
+
+        first_candidates = [float(r.get("first_ts") or 0.0) for r in cluster if float(r.get("first_ts") or 0.0) > 0]
+        last_candidates = [float(r.get("last_ts") or 0.0) for r in cluster if float(r.get("last_ts") or 0.0) > 0]
+        if first_candidates:
+            merged["first_ts"] = min(first_candidates)
+        if last_candidates:
+            merged["last_ts"] = max(last_candidates)
+
+        for key in ("battle_id", "local_uid", "local_camp", "mode_label", "pvp_type", "map_id", "local_party_size", "party_label", "country_counts"):
+            val = merged.get(key)
+            if not val:
+                for cand in reversed(ordered):
+                    if cand.get(key):
+                        merged[key] = cand[key]
+                        break
+
+        # Merge players by uid across all records in cluster; richer/pcap record breaks ties.
+        by_uid: dict[int, dict[str, Any]] = {}
+        for rec in ordered:
+            for raw_p in rec.get("players") or []:
+                if not isinstance(raw_p, dict):
+                    continue
+                uid = raw_p.get("uid")
+                if not isinstance(uid, int) or uid <= 0:
+                    continue
+                cur = by_uid.get(uid)
+                if cur is None:
+                    by_uid[uid] = dict(raw_p)
+                    continue
+                if _is_real_player_name(raw_p.get("name")):
+                    cur["name"] = raw_p["name"]
+                for fld in ("hero_id", "hero_name", "country", "zone_id", "room_id", "party_size"):
+                    if raw_p.get(fld):
+                        cur[fld] = raw_p[fld]
+                if raw_p.get("is_bot"):
+                    cur["is_bot"] = True
+                if raw_p.get("camp") in (1, 2) and (not cur.get("camp") or rec.get("origin") == "pcap"):
+                    cur["camp"] = raw_p["camp"]
+                if raw_p.get("seat") is not None and (cur.get("seat") is None or rec.get("origin") == "pcap"):
+                    cur["seat"] = raw_p["seat"]
+                if cur.get("camp") in (1, 2) and cur.get("seat") is not None:
+                    cur["slot"] = (int(cur["camp"]) << 4) | int(cur["seat"])
+
+        players = sorted(
+            by_uid.values(),
+            key=lambda p: (p.get("camp") if p.get("camp") in (1, 2) else 9, p.get("seat") if isinstance(p.get("seat"), int) else 9, int(p["uid"])),
+        )
+        merged["players"] = players
+
+        # Merge & deduplicate events sorted chronologically.
+        by_ev_key: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for rec in ordered:
+            for raw_e in rec.get("events") or []:
+                if not isinstance(raw_e, dict):
+                    continue
+                k = _event_dedup_key(raw_e)
+                ev_copy = dict(raw_e)
+                prev = by_ev_key.get(k)
+                if prev is None:
+                    by_ev_key[k] = ev_copy
+                else:
+                    if prev.get("sender_uid") is None and ev_copy.get("sender_uid") is not None:
+                        prev["sender_uid"] = ev_copy["sender_uid"]
+                    if not _is_real_player_name(prev.get("sender_name")) and _is_real_player_name(ev_copy.get("sender_name")):
+                        prev["sender_name"] = ev_copy["sender_name"]
+                    if not prev.get("sender_hero") and ev_copy.get("sender_hero"):
+                        prev["sender_hero"] = ev_copy["sender_hero"]
+                        prev["sender_hero_id"] = ev_copy.get("sender_hero_id")
+                    if prev.get("side") in (None, "UNKNOWN", "CAMP 1", "CAMP 2") and ev_copy.get("side") in ("SELF", "ALLY", "ENEMY"):
+                        prev["side"] = ev_copy["side"]
+
+        events = sorted(by_ev_key.values(), key=lambda e: (float(e.get("ts") or 0.0), int(e.get("seq_id") or 0)))
+        merged["events"] = events
+        merged["event_count"] = len(events)
+
+        # Prefer 0-gap view only if a record in cluster has equal/more events with no gaps.
+        best_ev_len = len(best.get("events") or [])
+        no_gap_full = [r for r in cluster if not (r.get("gaps") or []) and len(r.get("events") or []) >= best_ev_len]
+        if no_gap_full:
+            merged["gaps"] = []
+
+    # Backfill player names, hero badges, and sides across merged/single record events.
+    players_by_uid: dict[int, dict[str, Any]] = {}
+    slot_to_uid: dict[int, int] = {}
+    for p in merged["players"]:
+        uid = p.get("uid")
+        if isinstance(uid, int) and uid > 0:
+            if not _is_real_player_name(p.get("name")) and uid_names and uid in uid_names:
+                p["name"] = uid_names[uid]
+            players_by_uid[uid] = p
+            slot = p.get("slot")
+            if isinstance(slot, int):
+                slot_to_uid[slot] = uid
+            elif p.get("camp") in (1, 2) and isinstance(p.get("seat"), int):
+                slot_to_uid[(int(p["camp"]) << 4) | int(p["seat"])] = uid
+    for ev in merged["events"]:
+        ev_uid = ev.get("sender_uid")
+        ev_slot = ev.get("slot")
+        if isinstance(ev_uid, int) and isinstance(ev_slot, int) and ev_slot not in slot_to_uid:
+            slot_to_uid[ev_slot] = ev_uid
+
+    local_uid = merged.get("local_uid")
+    local_camp = merged.get("local_camp")
+    for ev in merged["events"]:
+        uid = ev.get("sender_uid")
+        if uid is None and isinstance(ev.get("slot"), int):
+            uid = slot_to_uid.get(ev["slot"])
+            if uid is not None:
+                ev["sender_uid"] = uid
+        if isinstance(uid, int):
+            p = players_by_uid.get(uid)
+            if p is not None:
+                if _is_real_player_name(p.get("name")):
+                    ev["sender_name"] = p["name"]
+                elif not _is_real_player_name(ev.get("sender_name")) and uid_names and uid in uid_names:
+                    ev["sender_name"] = uid_names[uid]
+                if p.get("hero_id") and not ev.get("sender_hero"):
+                    ev["sender_hero_id"] = p["hero_id"]
+                    ev["sender_hero"] = p.get("hero_name") or ""
+                if ev.get("camp") is None and p.get("camp") in (1, 2):
+                    ev["camp"] = p["camp"]
+            elif not _is_real_player_name(ev.get("sender_name")):
+                if uid_names and uid in uid_names:
+                    ev["sender_name"] = uid_names[uid]
+                else:
+                    ev["sender_name"] = f"uid:{uid}"
+        camp = ev.get("camp")
+        if local_uid is not None and uid == local_uid:
+            ev["side"] = "SELF"
+        elif local_camp in (1, 2) and camp in (1, 2):
+            ev["side"] = "ALLY" if camp == local_camp else "ENEMY"
+    return merged
+
+
+def _dedup_records(
+    records: list[dict[str, Any]],
+    *,
+    uid_names: dict[int, str] | None = None,
+) -> list[dict[str, Any]]:
     clusters: list[list[dict[str, Any]]] = []
     for rec in records:
         matched_idxs = [
@@ -158,7 +334,7 @@ def _dedup_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for idx in reversed(matched_idxs):
             merged.extend(clusters.pop(idx))
         clusters.append(merged)
-    return [max(cluster, key=_record_quality) for cluster in clusters]
+    return [_merge_match_cluster(cluster, uid_names=uid_names) for cluster in clusters]
 
 
 def _decode_pcap_to_records(path: Path, templates: TemplateResolver) -> list[dict[str, Any]]:
@@ -459,16 +635,89 @@ class MatchHistoryStore:
             if any_changed:
                 self._notify_change()
 
+    def _build_uid_name_map_locked(self) -> dict[int, str]:
+        recs: list[dict[str, Any]] = []
+        recs.extend(self._live_games.values())
+        for entry in self._pcap_cache.values():
+            recs.extend(entry.get("games") or [])
+        recs.sort(key=lambda r: float(r.get("last_ts") or r.get("first_ts") or 0.0))
+        uid_names: dict[int, str] = {}
+        for rec in recs:
+            for p in rec.get("players") or []:
+                if not isinstance(p, dict):
+                    continue
+                uid = p.get("uid")
+                name = p.get("name")
+                if isinstance(uid, int) and uid > 0 and _is_real_player_name(name):
+                    uid_names[uid] = str(name)
+        return uid_names
+
+    def lookup_player_name(self, uid: int) -> str | None:
+        """Return the latest known real player name for `uid` from history, if any."""
+        with self._lock:
+            return self._build_uid_name_map_locked().get(uid)
+
+    def lookup_match_roster(
+        self,
+        battle_id: str | None,
+        ep: tuple[str, int],
+        ts: float,
+    ) -> dict[str, Any] | None:
+        """Return merged roster & match metadata for a matching `battle_id` or recent draft endpoint."""
+        with self._lock:
+            all_records: list[dict[str, Any]] = []
+            all_records.extend(self._live_games.values())
+            for entry in self._pcap_cache.values():
+                all_records.extend(entry.get("games") or [])
+
+            seeds: list[dict[str, Any]] = []
+            bid = str(battle_id or "").strip()
+            for rec in all_records:
+                rec_bid = str(rec.get("battle_id") or "").strip()
+                if bid and rec_bid == bid:
+                    seeds.append(rec)
+                elif (
+                    not rec_bid
+                    and (rec.get("players") or [])
+                    and rec.get("server_ip") == ep[0]
+                    and rec.get("server_port") == ep[1]
+                ):
+                    r_first = float(rec.get("first_ts") or 0.0)
+                    r_last = float(rec.get("last_ts") or r_first)
+                    if -5.0 <= (ts - r_first) <= 2400.0 and (ts - r_last) <= 600.0:
+                        seeds.append(rec)
+
+            if not seeds:
+                return None
+            # Expand seeds to all same-match cluster peers (e.g. a battle_id record bridging a bid=None draft record).
+            candidates: list[dict[str, Any]] = []
+            for rec in all_records:
+                if any(rec is s or _same_match_record(s, rec) for s in seeds):
+                    candidates.append(rec)
+            uid_names = self._build_uid_name_map_locked()
+            merged = _merge_match_cluster(candidates, uid_names=uid_names)
+            if not (merged.get("players") or []) and merged.get("local_camp") not in (1, 2):
+                return None
+            return {
+                "players": merged.get("players") or [],
+                "local_uid": merged.get("local_uid"),
+                "local_camp": merged.get("local_camp"),
+                "mode_label": merged.get("mode_label") or "",
+                "pvp_type": merged.get("pvp_type"),
+                "map_id": merged.get("map_id"),
+            }
+
     def list_games(self, *, include_empty: bool = False) -> dict[str, Any]:
-        """Return newest-first deduplicated game summaries across live history and cached PCAPs."""
+        """Return newest-first deduplicated and merged game summaries across live history and cached PCAPs."""
         all_records: list[dict[str, Any]] = []
         with self._lock:
             all_records.extend(self._live_games.values())
             for entry in self._pcap_cache.values():
                 all_records.extend(entry.get("games") or [])
             scan = dict(self._scan_state)
+            uid_names = self._build_uid_name_map_locked()
 
-        deduped = _dedup_records(all_records)
+        deduped = _dedup_records(all_records, uid_names=uid_names)
         summaries = [_summarize_game(r) for r in deduped]
         summaries.sort(key=lambda g: (g["started_at"], g["game_id"]), reverse=True)
         total_all = len(summaries)
@@ -482,18 +731,34 @@ class MatchHistoryStore:
         }
 
     def get_game(self, game_id: str) -> dict[str, Any] | None:
-        """Return full game record (summary + players + events + gaps) by id."""
+        """Return full merged game record (summary + players + events + gaps) by id."""
         with self._lock:
-            if game_id in self._live_games:
-                rec = dict(self._live_games[game_id])
-                rec["summary"] = _summarize_game(rec)
-                return rec
+            all_records: list[dict[str, Any]] = []
+            all_records.extend(self._live_games.values())
             for entry in self._pcap_cache.values():
-                for rec in entry.get("games") or []:
-                    if rec.get("game_id") == game_id:
-                        out = dict(rec)
-                        out["summary"] = _summarize_game(out)
-                        return out
+                all_records.extend(entry.get("games") or [])
+
+            target_rec: dict[str, Any] | None = None
+            if game_id in self._live_games:
+                target_rec = self._live_games[game_id]
+            else:
+                for entry in self._pcap_cache.values():
+                    for rec in entry.get("games") or []:
+                        if rec.get("game_id") == game_id:
+                            target_rec = rec
+                            break
+                    if target_rec is not None:
+                        break
+
+            if target_rec is not None:
+                cluster = [r for r in all_records if r is target_rec or _same_match_record(target_rec, r)]
+                uid_names = self._build_uid_name_map_locked()
+                out = _merge_match_cluster(cluster, uid_names=uid_names)
+                out["game_id"] = target_rec.get("game_id", game_id)
+                out["origin"] = target_rec.get("origin", out.get("origin"))
+                out["source_name"] = target_rec.get("source_name", out.get("source_name"))
+                out["summary"] = _summarize_game(out)
+                return out
 
         # Lazy single-file decode if requested before background scan finishes.
         if game_id.startswith("pcap:"):
@@ -518,10 +783,18 @@ class MatchHistoryStore:
                             "templates_sig": self._templates_signature(),
                             "games": records,
                         }
+                        all_records = list(self._live_games.values())
+                        for entry in self._pcap_cache.values():
+                            all_records.extend(entry.get("games") or [])
+                        uid_names = self._build_uid_name_map_locked()
                     self._persist_pcap_cache()
                     for rec in records:
                         if rec.get("game_id") == game_id:
-                            out = dict(rec)
+                            cluster = [r for r in all_records if r is rec or _same_match_record(rec, r)]
+                            out = _merge_match_cluster(cluster, uid_names=uid_names)
+                            out["game_id"] = rec.get("game_id", game_id)
+                            out["origin"] = rec.get("origin", out.get("origin"))
+                            out["source_name"] = rec.get("source_name", out.get("source_name"))
                             out["summary"] = _summarize_game(out)
                             return out
         return None

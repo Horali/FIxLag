@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .battle import BattleTickProcessor, extract_ticks_from_subframe, parse_0175_subframes
 from .kcp import KcpStreamReassembler, ReassembledKcpMessage
@@ -24,6 +24,7 @@ from .protocol import (
 from .templates import TemplateResolver
 
 logger = logging.getLogger(__name__)
+_UNSET = object()
 
 MATCH_PORT_LO = 5000
 MATCH_PORT_HI = 5999
@@ -334,6 +335,8 @@ class MatchStore:
 
         self._source_mode = "IDLE"
         self._source_detail = ""
+        self._active_serial = ""
+        self._switching_to: str | None = None
         self._capture_alive = False
         self._last_pkt_mono: float | None = None
         self._last_error: str | None = None
@@ -347,6 +350,8 @@ class MatchStore:
             self._active_match_id = None
             self._source_mode = source_mode
             self._source_detail = source_detail
+            self._active_serial = ""
+            self._switching_to = None
             self._capture_alive = source_mode in ("LIVE (adb)", "FOLLOW (file)", "REPLAY (file)")
             self._last_pkt_mono = None
             self._last_error = None
@@ -361,7 +366,9 @@ class MatchStore:
         alive: bool,
         source_mode: str | None = None,
         source_detail: str | None = None,
-        error: str | None = None,
+        error: Any = _UNSET,
+        active_serial: str | None = None,
+        switching_to: Any = _UNSET,
     ) -> None:
         with self._lock:
             self._capture_alive = alive
@@ -369,8 +376,12 @@ class MatchStore:
                 self._source_mode = source_mode
             if source_detail is not None:
                 self._source_detail = source_detail
-            if error is not None:
+            if error is not _UNSET:
                 self._last_error = error
+            if active_serial is not None:
+                self._active_serial = active_serial
+            if switching_to is not _UNSET:
+                self._switching_to = switching_to
             status = self.get_status()
         self.publish("status", status)
 
@@ -490,6 +501,8 @@ class MatchStore:
             return {
                 "source_mode": self._source_mode,
                 "source_detail": self._source_detail,
+                "active_serial": self._active_serial,
+                "switching_to": self._switching_to,
                 "capture_alive": self._capture_alive,
                 "last_pkt_age_s": age_s,
                 "last_error": self._last_error,
@@ -534,19 +547,124 @@ class SessionRouter:
         self,
         store: MatchStore | None = None,
         templates: TemplateResolver | None = None,
+        match_roster_lookup: Callable[[str | None, tuple[str, int], float], dict[str, Any] | None] | None = None,
+        uid_name_lookup: Callable[[int], str | None] | None = None,
     ) -> None:
+        self._lock = threading.RLock()
         self.store = store if store is not None else MatchStore()
         self.templates = templates if templates is not None else TemplateResolver()
+        self.match_roster_lookup = match_roster_lookup
+        self.uid_name_lookup = uid_name_lookup
         self.kcp = KcpStreamReassembler()
         self._active_by_ep: dict[tuple[str, int], MatchSession] = {}
         self._active_by_battle_id: dict[str, MatchSession] = {}
         self._match_seq = 0
 
     def reset(self) -> None:
-        self.kcp = KcpStreamReassembler()
-        self._active_by_ep.clear()
-        self._active_by_battle_id.clear()
-        self._match_seq = 0
+        with self._lock:
+            self.kcp = KcpStreamReassembler()
+            self._active_by_ep.clear()
+            self._active_by_battle_id.clear()
+            self._match_seq = 0
+
+    def _hydrate_session_roster(self, sess: MatchSession, ts: float) -> bool:
+        if self.match_roster_lookup is None:
+            return False
+        if len(sess.players_by_uid) >= 10 and all(p.name for p in sess.players_by_uid.values()):
+            return False
+        saved = self.match_roster_lookup(sess.battle_id, sess.ep, ts)
+        if not saved:
+            return False
+
+        changed = False
+        if self._apply_mode(sess, saved.get("pvp_type"), saved.get("map_id")):
+            changed = True
+        saved_mode = saved.get("mode_label")
+        if isinstance(saved_mode, str) and saved_mode and not sess.mode_label:
+            sess.mode_label = saved_mode
+            changed = True
+        saved_luid = saved.get("local_uid")
+        if sess.local_uid is None and isinstance(saved_luid, int) and saved_luid > 0:
+            sess.local_uid = saved_luid
+            changed = True
+        saved_lcamp = saved.get("local_camp")
+        if sess.local_camp is None and saved_lcamp in (1, 2):
+            sess.local_camp = saved_lcamp
+            changed = True
+
+        for raw_p in saved.get("players") or []:
+            if not isinstance(raw_p, dict):
+                continue
+            uid = raw_p.get("uid")
+            if not isinstance(uid, int) or uid <= 0:
+                continue
+            raw_name = str(raw_p.get("name") or "")
+            name = "" if (raw_name.startswith("uid:") or raw_name.startswith("slot 0x")) else raw_name
+            camp = raw_p.get("camp") if raw_p.get("camp") in (1, 2) else None
+            seat = raw_p.get("seat") if isinstance(raw_p.get("seat"), int) else None
+            is_bot = bool(raw_p.get("is_bot"))
+            country = str(raw_p.get("country") or "")
+            zone_raw = raw_p.get("zone_id")
+            zone_id = zone_raw if isinstance(zone_raw, int) and zone_raw > 0 else None
+            room_raw = raw_p.get("room_id")
+            room_id = room_raw if isinstance(room_raw, int) and room_raw > 0 else None
+            hid_raw = raw_p.get("hero_id")
+            hero_id = hid_raw if isinstance(hid_raw, int) and hid_raw > 0 else None
+            hero_name = str(raw_p.get("hero_name") or "")
+            if hero_id is not None and not hero_name and self.templates.loaded:
+                hero_name = self.templates.heroes.get(str(hero_id), "")
+
+            existing = sess.players_by_uid.get(uid)
+            if existing is None:
+                sess.players_by_uid[uid] = PlayerInfo(
+                    uid=uid,
+                    name=name,
+                    camp=camp,
+                    seat=seat,
+                    hero_id=hero_id,
+                    hero_name=hero_name,
+                    is_bot=is_bot,
+                    country=country,
+                    zone_id=zone_id,
+                    room_id=room_id,
+                )
+                changed = True
+            else:
+                if self._merge_player_meta(
+                    existing,
+                    name=name,
+                    is_bot=is_bot,
+                    country=country,
+                    zone_id=zone_id,
+                    room_id=room_id,
+                ):
+                    changed = True
+                if hero_id is not None and existing.hero_id is None:
+                    existing.hero_id = hero_id
+                    existing.hero_name = hero_name
+                    changed = True
+                if not sess.attribution_frozen and uid not in sess.swapped_uids:
+                    if camp is not None and existing.camp is None:
+                        existing.camp = camp
+                        changed = True
+                    if seat is not None and existing.seat is None:
+                        existing.seat = seat
+                        changed = True
+
+            if camp is not None and seat is not None:
+                slot = (camp << 4) | seat
+                if (
+                    slot not in sess.slot_to_uid
+                    and uid not in sess.swapped_uids
+                    and uid not in sess.slot_to_uid.values()
+                ):
+                    sess.slot_to_uid[slot] = uid
+                    changed = True
+                sess.slot_to_camp.setdefault(slot, camp)
+
+        if changed:
+            self._refresh_local_attribution(sess)
+        return changed
 
     def _new_match(self, ep: tuple[str, int], ts: float, battle_id: str | None = None) -> MatchSession:
         self._match_seq += 1
@@ -557,6 +675,8 @@ class SessionRouter:
             self._active_by_battle_id[battle_id] = sess
         self.store.register_match(sess)
         self.store.publish("match_new", sess.summary_dict())
+        if battle_id:
+            self._hydrate_session_roster(sess, ts)
         return sess
 
     def _get_or_create(self, ep: tuple[str, int], ts: float) -> MatchSession:
@@ -567,52 +687,55 @@ class SessionRouter:
 
     def on_packet(self, pkt: UdpPacket, *, skipped_truncated: int = 0) -> None:
         """Process one non-truncated UDP packet."""
-        classified = _classify_packet(pkt)
-        if classified is None:
-            return
-        direction, ep = classified
-        self.store.note_packet_seen(skipped_truncated=skipped_truncated)
+        with self._lock:
+            classified = _classify_packet(pkt)
+            if classified is None:
+                return
+            direction, ep = classified
+            self.store.note_packet_seen(skipped_truncated=skipped_truncated)
 
-        payload = pkt.payload
-        cmd2 = payload[:2]
-        sess = self._get_or_create(ep, pkt.ts)
-        self.store.set_active_match(sess.match_id)
+            payload = pkt.payload
+            cmd2 = payload[:2]
+            sess = self._get_or_create(ep, pkt.ts)
+            self.store.set_active_match(sess.match_id)
 
-        if cmd2 in (b"\x01\x71", b"\x01\x72"):
-            conv_hex = payload[2:6].hex()
-            if conv_hex not in sess.convs:
-                sess.convs.add(conv_hex)
-                if sess.phase == "BATTLE" or sess.battle.max_tick_seen >= 0:
-                    sess.rebind_count += 1
-            sess.last_ts = max(sess.last_ts, pkt.ts)
-            return
+            if cmd2 in (b"\x01\x71", b"\x01\x72"):
+                conv_hex = payload[2:6].hex()
+                if conv_hex not in sess.convs:
+                    sess.convs.add(conv_hex)
+                    if sess.phase == "BATTLE" or sess.battle.max_tick_seen >= 0:
+                        sess.rebind_count += 1
+                sess.last_ts = max(sess.last_ts, pkt.ts)
+                return
 
-        if cmd2 in (b"\x01\x73", b"\x01\x76"):
-            sess.convs.add(payload[2:6].hex())
-            sess.last_ts = max(sess.last_ts, pkt.ts)
-            return
+            if cmd2 in (b"\x01\x73", b"\x01\x76"):
+                sess.convs.add(payload[2:6].hex())
+                sess.last_ts = max(sess.last_ts, pkt.ts)
+                return
 
-        if cmd2 in (b"\x01\x51", b"\x41\x51", b"\x01\x52", b"\x41\x52"):
-            msgs = self.kcp.on_datagram(pkt.ts, ep, direction, payload)
-            for msg in msgs:
-                self._on_kcp_message(msg)
-            return
+            if cmd2 in (b"\x01\x51", b"\x41\x51", b"\x01\x52", b"\x41\x52"):
+                msgs = self.kcp.on_datagram(pkt.ts, ep, direction, payload)
+                for msg in msgs:
+                    self._on_kcp_message(msg)
+                return
 
-        if cmd2 == b"\x01\x75":
-            if direction == "out":
-                self._on_outbound_0175(sess, pkt.ts, payload)
-            else:
-                self._on_inbound_0175(sess, pkt.ts, payload)
+            if cmd2 == b"\x01\x75":
+                if direction == "out":
+                    self._on_outbound_0175(sess, pkt.ts, payload)
+                else:
+                    self._on_inbound_0175(sess, pkt.ts, payload)
 
     def _bind_battle_id(self, sess: MatchSession, battle_id: str, ts: float, from_login: bool) -> MatchSession:
         if sess.battle_id == battle_id:
             if from_login and sess.phase == "BATTLE" and sess.battle.max_tick_seen > 100:
                 sess.reconnect_expected = True
+            self._hydrate_session_roster(sess, ts)
             return sess
         if sess.battle_id is None:
             sess.battle_id = battle_id
             self._active_by_battle_id[battle_id] = sess
-            self.store.publish("match_update", sess.summary_dict())
+            if not self._hydrate_session_roster(sess, ts):
+                self.store.publish("match_update", sess.summary_dict())
             return sess
         existing = self._active_by_battle_id.get(battle_id)
         if existing is not None:
@@ -1404,6 +1527,7 @@ class SessionRouter:
                 sess.slot_to_camp[slot_val] = c
 
         uid = ev_uid
+        learned_slot_uid = False
         if uid is not None and slot_val is not None:
             prev_uid = sess.slot_to_uid.get(slot_val)
             if prev_uid is not None and prev_uid != uid:
@@ -1436,8 +1560,31 @@ class SessionRouter:
                     self.store.publish("match_update", sess.summary_dict())
             elif prev_uid is None:
                 sess.slot_to_uid[slot_val] = uid
+                learned_slot_uid = True
         elif uid is None and slot_val is not None:
             uid = sess.slot_to_uid.get(slot_val)
+
+        hydrated_player = False
+        if uid is not None and self.uid_name_lookup is not None:
+            existing_p = sess.players_by_uid.get(uid)
+            if existing_p is None or not existing_p.name:
+                known_name = self.uid_name_lookup(uid)
+                if known_name:
+                    seat_guess = (slot_val & 0x0F) if slot_val is not None else None
+                    if existing_p is None:
+                        sess.players_by_uid[uid] = PlayerInfo(
+                            uid=uid,
+                            name=known_name,
+                            camp=camp,
+                            seat=seat_guess,
+                        )
+                    else:
+                        existing_p.name = known_name
+                        if camp is not None and existing_p.camp is None:
+                            existing_p.camp = camp
+                        if seat_guess is not None and existing_p.seat is None:
+                            existing_p.seat = seat_guess
+                    hydrated_player = True
 
         # Outbound 0x44c fallback for mid-match starts before mid=1001/1202.
         if sess.local_camp is None and sess.pending_outbound_chats:
@@ -1501,6 +1648,10 @@ class SessionRouter:
         )
         sess.events.append(chat_ev)
         self.store.publish("chat", chat_ev.to_dict())
+        if hydrated_player or (
+            learned_slot_uid and any(prev.slot == slot_val and prev.sender_uid is None for prev in sess.events[:-1])
+        ):
+            self._refresh_local_attribution(sess)
         return sess
 
     @staticmethod
@@ -1527,10 +1678,22 @@ class SessionRouter:
                 if new_uid is not None:
                     ev.sender_uid = new_uid
                     updated = True
+            if new_uid is not None and new_uid not in sess.players_by_uid and self.uid_name_lookup is not None:
+                known_name = self.uid_name_lookup(new_uid)
+                if known_name:
+                    sess.players_by_uid[new_uid] = PlayerInfo(
+                        uid=new_uid,
+                        name=known_name,
+                        camp=ev.camp,
+                        seat=(ev.slot & 0x0F) if ev.slot is not None else None,
+                    )
             if new_uid is not None and new_uid in sess.players_by_uid:
                 p = sess.players_by_uid[new_uid]
                 if p.name and ev.sender_name != p.name:
                     ev.sender_name = p.name
+                    updated = True
+                elif not p.name and (not ev.sender_name or ev.sender_name.startswith("slot 0x") or ev.sender_name == "unknown"):
+                    ev.sender_name = f"uid:{new_uid}"
                     updated = True
                 if p.hero_id is not None and (ev.sender_hero_id != p.hero_id or ev.sender_hero != p.hero_name):
                     ev.sender_hero_id = p.hero_id
@@ -1539,6 +1702,9 @@ class SessionRouter:
                 if ev.camp is None and p.camp in (1, 2):
                     ev.camp = p.camp
                     updated = True
+            elif new_uid is not None and (not ev.sender_name or ev.sender_name.startswith("slot 0x") or ev.sender_name == "unknown"):
+                ev.sender_name = f"uid:{new_uid}"
+                updated = True
             if ev.camp is not None and sess.local_uid is not None and new_uid == sess.local_uid and sess.local_camp is None:
                 sess.local_camp = ev.camp
             new_side = self._resolve_side(sess, uid=ev.sender_uid, camp=ev.camp)
