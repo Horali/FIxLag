@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from typing import Callable
 
 # Magic -> (endianness, timestamp_divisor)
 PCAP_MAGICS: dict[bytes, tuple[str, float]] = {
@@ -122,6 +123,7 @@ class IncrementalPcapReader:
         self._buf = bytearray()
         self.offset = 0
         self.header_parsed = False
+        self.global_header: bytes = b""
         self.endian = "<"
         self.ts_div = 1_000_000.0
         self.snaplen = 0
@@ -129,7 +131,12 @@ class IncrementalPcapReader:
         self.total_records = 0
         self.skipped_truncated = 0
 
-    def feed(self, chunk: bytes) -> list[UdpPacket]:
+    def feed(
+        self,
+        chunk: bytes,
+        *,
+        on_record: Callable[[bytes], None] | None = None,
+    ) -> list[UdpPacket]:
         """Consume an arbitrary byte chunk and return complete decoded UDP packets."""
         if not chunk:
             return []
@@ -149,6 +156,7 @@ class IncrementalPcapReader:
             _, _, _, _, _, self.snaplen, self.linktype = struct.unpack_from(self.endian + "IHHIIII", self._buf, 0)
             if self.linktype not in SUPPORTED_LINKTYPES:
                 raise InvalidPcapMagicError(f"unsupported pcap linktype {self.linktype}")
+            self.global_header = bytes(self._buf[:24])
             del self._buf[:24]
             self.offset += 24
             self.header_parsed = True
@@ -163,6 +171,8 @@ class IncrementalPcapReader:
             rec_total = 16 + incl_len
             if buf_len - pos < rec_total:
                 break
+            if on_record is not None:
+                on_record(bytes(self._buf[pos : pos + rec_total]))
             raw_rec = bytes(self._buf[pos + 16 : pos + rec_total])
             pos += rec_total
             self.total_records += 1
