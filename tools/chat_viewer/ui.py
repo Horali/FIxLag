@@ -322,11 +322,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <div class="row">
           <span class="card-title">Phone Capture</span>
           <div class="spacer"></div>
+          <button id="btnConnectWireless" class="ghost" title="Enable/connect Wireless ADB on trusted Wi-Fi">Connect Wi-Fi</button>
           <button id="btnRefreshDevices" class="ghost" title="Refresh USB/ADB devices">Refresh</button>
         </div>
         <select id="adbSelect"></select>
         <label class="chk"><input type="checkbox" id="teeChk" checked> Save capture file (.pcap)</label>
         <button id="btnToggleCapture" class="primary">Start Live Capture</button>
+        <button id="btnSwitchDevice" class="primary" style="display:none; background:#0284c7; border-color:#0ea5e9;">Switch Live (No Drops)</button>
+        <button id="btnClearSession" class="ghost" style="display:none; align-self:flex-start;">Clear Active Session</button>
         <div id="captureHint" class="hint">Ready — connect phone with USB debugging and tap Start when in draft or match.</div>
         <div id="liveErrorBox" class="err-box"></div>
       </div>
@@ -397,6 +400,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
     selectedHistoryId: null,
     loadedHistoryGames: new Map(),
     status: {},
+    devices: [],
+    noticeMsg: "",
     sseOk: true,
     lastHeartbeatMs: Date.now(),
     sideFilter: "all",
@@ -423,6 +428,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     adbSelect: document.getElementById("adbSelect"),
     teeChk: document.getElementById("teeChk"),
     btnToggleCapture: document.getElementById("btnToggleCapture"),
+    btnSwitchDevice: document.getElementById("btnSwitchDevice"),
+    btnConnectWireless: document.getElementById("btnConnectWireless"),
+    btnClearSession: document.getElementById("btnClearSession"),
     captureHint: document.getElementById("captureHint"),
     liveErrorBox: document.getElementById("liveErrorBox"),
     liveMatchesList: document.getElementById("liveMatchesList"),
@@ -514,24 +522,73 @@ INDEX_HTML = r"""<!DOCTYPE html>
     renderMain();
   }
 
+  function pickSwitchTarget(s) {
+    const online = (state.devices || []).filter((d) => d.state === "device");
+    const active = s && s.active_serial ? s.active_serial : "";
+    if (!active) return null;
+    const sel = el.adbSelect ? el.adbSelect.value : "";
+    if (sel && sel !== active) {
+      const m = online.find((d) => d.serial === sel);
+      if (m) return m;
+    }
+    return online.find((d) => d.serial !== active) || null;
+  }
+
   function renderTopStatus() {
     const s = state.status || {};
     const mode = s.source_mode || "IDLE";
     const isLiveStream = mode === "LIVE (adb)" || mode === "FOLLOW (file)";
     const isCapturing = isLiveStream && !!s.capture_alive;
+    const hasSession = state.liveOrder.length > 0;
+    const switchTarget = (mode === "LIVE (adb)" && isCapturing) ? pickSwitchTarget(s) : null;
     el.liveDot.classList.toggle("on", isCapturing);
 
-    // Phone capture button + hint
+    // Phone capture buttons + hint
     if (isCapturing) {
       el.btnToggleCapture.textContent = "Stop Capture";
       el.btnToggleCapture.className = "danger";
-      el.captureHint.textContent = s.active_match_id
-        ? "Capturing live match packets — messages update automatically."
-        : "Connected and listening — start a match on your phone to see chat here.";
+      el.btnClearSession.style.display = "none";
+      if (s.switching_to) {
+        el.btnSwitchDevice.style.display = "block";
+        el.btnSwitchDevice.disabled = true;
+        el.btnSwitchDevice.textContent = `Switching to ${s.switching_to}...`;
+        el.captureHint.textContent = `Switching ADB stream to ${s.switching_to} while keeping existing packets...`;
+      } else if (switchTarget) {
+        const isWifiTarget = switchTarget.transport === "wireless" || switchTarget.serial.includes(":");
+        el.btnSwitchDevice.style.display = "block";
+        el.btnSwitchDevice.disabled = false;
+        el.btnSwitchDevice.textContent = isWifiTarget ? "Switch to Wi-Fi (No Drops)" : "Switch to USB (No Drops)";
+        if (s.active_serial && s.active_serial.includes(":")) {
+          el.captureHint.textContent = `Capturing on Wi-Fi (${s.active_serial}) — safe to unplug USB cable.`;
+        } else {
+          el.captureHint.textContent = `Capturing on USB (${s.active_serial || ""}) — click Switch to Wi-Fi (No Drops) before unplugging.`;
+        }
+      } else {
+        el.btnSwitchDevice.style.display = "none";
+        el.btnSwitchDevice.disabled = false;
+        if (s.active_serial && s.active_serial.includes(":")) {
+          el.captureHint.textContent = `Capturing on Wi-Fi (${s.active_serial}) — safe to unplug USB cable.`;
+        } else {
+          el.captureHint.textContent = state.noticeMsg || (
+            s.active_match_id
+              ? "Capturing live packets — click Connect Wi-Fi before switching off USB cable."
+              : "Connected and listening — start a match on your phone to see chat here."
+          );
+        }
+      }
     } else {
-      el.btnToggleCapture.textContent = "Start Live Capture";
+      el.btnSwitchDevice.style.display = "none";
+      el.btnSwitchDevice.disabled = false;
+      el.btnToggleCapture.textContent = hasSession ? "Resume Live Capture" : "Start Live Capture";
       el.btnToggleCapture.className = "primary";
-      el.captureHint.textContent = "Ready — connect phone with USB debugging and tap Start when in draft or match.";
+      el.btnClearSession.style.display = hasSession ? "inline-block" : "none";
+      if (state.noticeMsg) {
+        el.captureHint.textContent = state.noticeMsg;
+      } else if (hasSession) {
+        el.captureHint.textContent = `Session paused (${state.liveOrder.length} game in view). Tap Resume Live Capture to keep player names and chat.`;
+      } else {
+        el.captureHint.textContent = "Ready — connect phone with USB or Wi-Fi ADB and tap Start when in draft or match.";
+      }
     }
 
     if (s.last_error) {
@@ -550,7 +607,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
       cls = "status-pill err";
       label = "Disconnected";
     } else if (isLiveStream && s.capture_alive) {
-      if (typeof age === "number" && age > staleThreshold) {
+      if (s.switching_to) {
+        cls = "status-pill info";
+        label = "Switching ADB...";
+      } else if (typeof age === "number" && age > staleThreshold) {
         cls = "status-pill warn";
         label = `No packets for ${Math.floor(age)}s`;
       } else if (s.active_match_id) {
@@ -1142,9 +1202,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
   async function refreshDevicesAndPcaps() {
     try {
+      const prevSerial = el.adbSelect.value;
       const [devRes, pcapRes] = await Promise.all([fetch("/api/devices"), fetch("/api/pcaps")]);
       const devs = (await devRes.json()).devices || [];
       const pcaps = (await pcapRes.json()).pcaps || [];
+      state.devices = devs;
+      const s = state.status || {};
+      const activeSerial = (s.capture_alive && s.active_serial) ? s.active_serial : "";
 
       el.adbSelect.innerHTML = "";
       if (devs.length === 0) {
@@ -1155,8 +1219,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
         for (const d of devs) {
           const o = document.createElement("option");
           o.value = d.serial;
-          o.textContent = d.model ? `${d.model} (${d.serial})` : `${d.serial} (${d.state})`;
+          const isWifi = d.transport === "wireless" || String(d.serial).includes(":");
+          const kindTag = isWifi ? "[Wi-Fi]" : "[USB]";
+          const activeTag = d.serial === activeSerial ? " · Active" : "";
+          const namePart = d.model ? `${d.model} (${d.serial})` : `${d.serial} (${d.state})`;
+          o.textContent = `${kindTag} ${namePart}${activeTag}`;
           el.adbSelect.appendChild(o);
+        }
+        if (prevSerial && devs.some((d) => d.serial === prevSerial)) {
+          el.adbSelect.value = prevSerial;
+        } else if (activeSerial && devs.some((d) => d.serial === activeSerial)) {
+          el.adbSelect.value = activeSerial;
         }
       }
 
@@ -1167,6 +1240,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         o.textContent = `${p.name} (${(p.size_bytes / 1048576).toFixed(1)} MB)`;
         el.pcapSelect.appendChild(o);
       }
+      renderTopStatus();
     } catch (_e) {}
   }
 
@@ -1307,10 +1381,50 @@ INDEX_HTML = r"""<!DOCTYPE html>
   });
 
   document.getElementById("btnRefreshDevices").onclick = refreshDevicesAndPcaps;
+  el.adbSelect.onchange = () => renderTopStatus();
+  el.btnConnectWireless.onclick = async () => {
+    el.btnConnectWireless.disabled = true;
+    el.btnConnectWireless.textContent = "Connecting...";
+    try {
+      const res = await fetch("/api/adb/wireless", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "connect" }),
+      });
+      const data = await res.json();
+      state.noticeMsg = data.message || "";
+      if (!data.ok && data.message) state.status.last_error = data.message;
+      else state.status.last_error = null;
+      await refreshDevicesAndPcaps();
+      if (data.connected && data.connected.length > 0 && state.status.capture_alive) {
+        el.adbSelect.value = data.connected[0];
+      }
+      renderTopStatus();
+    } catch (_e) {
+      state.status.last_error = "Failed to query Wireless ADB.";
+      renderTopStatus();
+    } finally {
+      el.btnConnectWireless.disabled = false;
+      el.btnConnectWireless.textContent = "Connect Wi-Fi";
+    }
+  };
+  el.btnSwitchDevice.onclick = async () => {
+    const target = pickSwitchTarget(state.status || {});
+    if (!target) return;
+    state.noticeMsg = "";
+    setTab("live", true);
+    await postSource({ mode: "switch_adb", serial: target.serial, tee: el.teeChk.checked });
+    await refreshDevicesAndPcaps();
+  };
+  el.btnClearSession.onclick = async () => {
+    state.noticeMsg = "";
+    await postSource({ mode: "clear" });
+  };
   el.btnToggleCapture.onclick = () => {
     const s = state.status || {};
     const isCapturing = (s.source_mode === "LIVE (adb)" || s.source_mode === "FOLLOW (file)") && s.capture_alive;
     if (isCapturing) {
+      state.noticeMsg = "";
       postSource({ mode: "stop" });
       return;
     }
@@ -1320,8 +1434,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
       renderTopStatus();
       return;
     }
+    state.noticeMsg = "";
+    const preserve = state.liveOrder.length > 0;
     setTab("live", true);
-    postSource({ mode: "adb", serial, tee: el.teeChk.checked });
+    postSource({ mode: "adb", serial, tee: el.teeChk.checked, preserve_session: preserve });
   };
 
   document.getElementById("btnLoadPcap").onclick = () => {

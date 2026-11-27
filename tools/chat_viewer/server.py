@@ -20,6 +20,7 @@ from .ingest import IngestController, list_adb_devices
 from .session import MatchStore, SessionRouter
 from .templates import TemplateResolver
 from .ui import INDEX_HTML
+from ..lag_mapper.wireless_adb import TRUSTED_SSIDS, disable_wireless_adb, ensure_wireless_adb
 
 LOOPBACK_HOST = "127.0.0.1"
 DEFAULT_CAPTURES_DIR = Path(__file__).resolve().parents[2] / "captures"
@@ -51,7 +52,6 @@ def create_app(
     cap_dir = Path(captures_dir) if captures_dir is not None else DEFAULT_CAPTURES_DIR
     templates = TemplateResolver(templates_path)
     store = MatchStore()
-    router = SessionRouter(store=store, templates=templates)
 
     def _notify_history_changed() -> None:
         store.publish("history_updated", {"ts": time.time()})
@@ -61,6 +61,12 @@ def create_app(
         history_dir=history_dir,
         templates=templates,
         on_change=_notify_history_changed,
+    )
+    router = SessionRouter(
+        store=store,
+        templates=templates,
+        match_roster_lookup=history.lookup_match_roster,
+        uid_name_lookup=history.lookup_player_name,
     )
     ingest = IngestController(
         router=router,
@@ -96,6 +102,29 @@ def create_app(
     async def api_devices(_request: Request) -> JSONResponse:
         return JSONResponse({"devices": list_adb_devices(adb_path)})
 
+    async def api_adb_wireless(request: Request) -> JSONResponse:
+        body: dict[str, Any] = {}
+        try:
+            parsed = await request.json()
+            if isinstance(parsed, dict):
+                body = parsed
+        except ValueError:
+            body = {}
+
+        action = str(body.get("action") or "connect").strip().lower()
+        if action == "connect":
+            res = await asyncio.to_thread(ensure_wireless_adb, adb_path)
+            return JSONResponse(res)
+        if action == "disable":
+            raw_serial = body.get("serial")
+            serial_arg = str(raw_serial).strip() if raw_serial else None
+            res = await asyncio.to_thread(disable_wireless_adb, adb_path, serial=serial_arg)
+            return JSONResponse(res)
+        return JSONResponse(
+            {"error": f"Unknown wireless action {action!r}", "trusted_ssids": list(TRUSTED_SSIDS)},
+            status_code=400,
+        )
+
     async def api_source(request: Request) -> JSONResponse:
         try:
             body = await request.json()
@@ -108,7 +137,14 @@ def create_app(
         try:
             if mode == "stop":
                 ingest.stop()
-                store.set_capture_state(alive=False, source_mode="IDLE", source_detail="", error=None)
+                store.set_capture_state(alive=False, source_mode="IDLE", source_detail="", switching_to=None, error=None)
+                return JSONResponse({"ok": True, "status": store.get_status()})
+
+            if mode == "clear":
+                ingest.stop()
+                router.reset()
+                store.reset_for_new_source("IDLE", "")
+                store.set_capture_state(alive=False, source_mode="IDLE", source_detail="", switching_to=None, error=None)
                 return JSONResponse({"ok": True, "status": store.get_status()})
 
             if mode == "pcap":
@@ -119,12 +155,13 @@ def create_app(
                 ingest.start_pcap(Path(str(raw_path)), follow=follow)
                 return JSONResponse({"ok": True, "status": store.get_status()})
 
-            if mode == "adb":
+            if mode in ("adb", "switch_adb"):
                 serial = str(body.get("serial") or "").strip()
                 if not serial:
                     return JSONResponse({"error": "Missing 'serial'"}, status_code=400)
                 tee = bool(body.get("tee", False))
-                ingest.start_adb(serial, tee=tee)
+                preserve = True if mode == "switch_adb" else bool(body.get("preserve_session", False))
+                ingest.start_adb(serial, tee=tee, preserve_session=preserve)
                 return JSONResponse({"ok": True, "status": store.get_status()})
 
             return JSONResponse({"error": f"Unknown mode {mode!r}"}, status_code=400)
@@ -259,6 +296,7 @@ def create_app(
             Route("/api/matches", api_matches, methods=["GET"]),
             Route("/api/pcaps", api_pcaps, methods=["GET"]),
             Route("/api/devices", api_devices, methods=["GET"]),
+            Route("/api/adb/wireless", api_adb_wireless, methods=["POST"]),
             Route("/api/source", api_source, methods=["POST"]),
             Route("/api/history", api_history_list, methods=["GET"]),
             Route("/api/history/scan", api_history_scan, methods=["POST"]),
