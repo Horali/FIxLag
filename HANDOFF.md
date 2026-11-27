@@ -9,9 +9,9 @@ Finding: ping variance is server-side (city/provider/IP); client-side tools only
 - `tools/chat_viewer` runs a `127.0.0.1` web + SSE viewer for live ADB tcpdump or saved `.pcap` replays (`mid=1242`/`1230`/`1202`/`1203`, mode, country, bot, party size, hero picks).
 - Past Games deduplicates `live:` vs `pcap:` records by `battle_id` (fallback `(ip, port, first_ts <= 5s)`), prefers richer/newer `.pcap` records, auto-indexes teed captures on stop, and pushes `history_updated` SSE events.
 - Specification ready for FIxLag Server & Live Packet Mapper (`127.0.0.1:8766`): [docs/lag-mapper-spec.md](docs/lag-mapper-spec.md).
-- `tools/lag_mapper` runs a `127.0.0.1:8766` web + SSE server with 4 tabs (Server Map, 7-lane Live Packet Detector, Lobby/Party/Ping correlation, All Matches), `:30101` batch Zstd (`mid=10208` dropped), `0x3f5` Wi-Fi vs Cellular RTT, `:30190` probes, TCP `:port+50` mirror, and `matches.csv` + `lag_mapper_notes.json` persistence.
+- `tools/lag_mapper` runs a `127.0.0.1:8766` (auto-fallback) web + SSE server with 4 tabs, `:30101` batch Zstd (`mid=10208` dropped), `0x3f5` Wi-Fi vs Cellular RTT, `:30190` probes, TCP `:port+50` mirror, trusted-Wi-Fi wireless ADB (`Kos gk atas`, `Pribadi`), and `matches.csv` + `lag_mapper_notes.json` persistence.
 - Test suite (`pytest -v tests/test_chat_viewer.py`): 16 tests passing.
-- Packet mapper suite (`pytest -v tests/test_lag_mapper.py`): 8 tests passing.
+- Packet mapper suite (`pytest -v tests/test_lag_mapper.py`): 9 tests passing.
 
 ## Active tasks
 _(none)_
