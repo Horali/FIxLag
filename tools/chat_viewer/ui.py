@@ -831,10 +831,16 @@ INDEX_HTML = r"""<!DOCTYPE html>
   }
 
   function formatGapText(g) {
+    const prefix =
+      g.reason === "packet_loss"
+        ? "Missed packets"
+        : g.reason === "desync"
+          ? "Stream resync"
+          : "Joined mid-match";
     if (g.resolved && g.from_tick !== null && g.to_tick !== null) {
-      return `Joined mid-match — ticks ${g.from_tick} to ${g.to_tick} couldn't be decoded. Resynced at tick ${g.sync_tick}.`;
+      return `${prefix} — ticks ${g.from_tick} to ${g.to_tick} couldn't be decoded. Resynced at tick ${g.sync_tick}.`;
     }
-    return `Joined mid-match — waiting for next LZW reset to decode chat (from tick ${g.from_tick}).`;
+    return `${prefix} — waiting for next LZW reset to decode chat (from tick ${g.from_tick}).`;
   }
 
   function renderMain() {

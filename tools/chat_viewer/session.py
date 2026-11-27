@@ -185,6 +185,7 @@ class GapBanner:
     sync_tick: int | None
     resolved: bool
     message: str
+    reason: str = "mid_match"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -196,6 +197,7 @@ class GapBanner:
             "sync_tick": self.sync_tick,
             "resolved": self.resolved,
             "message": self.message,
+            "reason": self.reason,
         }
 
 
@@ -1330,6 +1332,7 @@ class SessionRouter:
                             sync_tick=None,
                             resolved=False,
                             message=out.message,
+                            reason=out.reason,
                         )
                         sess.gaps.append(gap)
                         self.store.publish("gap", gap.to_dict())
@@ -1347,6 +1350,7 @@ class SessionRouter:
                                 sync_tick=out.sync_tick,
                                 resolved=True,
                                 message=out.message,
+                                reason=out.reason,
                             )
                             sess.gaps.append(target_gap)
                         else:
@@ -1354,6 +1358,7 @@ class SessionRouter:
                             target_gap.sync_tick = out.sync_tick
                             target_gap.resolved = True
                             target_gap.message = out.message
+                            target_gap.reason = out.reason
                         self.store.publish("gap", target_gap.to_dict())
                     elif out.kind == "events":
                         sess = self._dispatch_subevents(
