@@ -11,7 +11,7 @@ Finding: ping variance is server-side (city/provider/IP); client-side tools only
 - Specification ready for FIxLag Server & Live Packet Mapper (`127.0.0.1:8766`): [docs/lag-mapper-spec.md](docs/lag-mapper-spec.md).
 - `tools/lag_mapper` runs a `127.0.0.1:8766` web + SSE server with 4 tabs (Server Map, 7-lane Live Packet Detector, Lobby/Party/Ping correlation, All Matches), `:30101` batch Zstd (`mid=10208` dropped), `0x3f5` Wi-Fi vs Cellular RTT, `:30190` probes, TCP `:port+50` mirror, and `matches.csv` + `lag_mapper_notes.json` persistence.
 - Test suite (`pytest -v tests/test_chat_viewer.py`): 16 tests passing.
-- Packet mapper suite (`pytest -v tests/test_lag_mapper.py`): 7 tests passing.
+- Packet mapper suite (`pytest -v tests/test_lag_mapper.py`): 8 tests passing.
 
 ## Active tasks
 _(none)_
