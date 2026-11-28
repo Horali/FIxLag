@@ -12,6 +12,7 @@ Finding: ping variance is server-side (city/provider/IP); client-side tools only
 - Past Games merges split captures per `battle_id`, backfills slot/UID names via `SessionRouter` roster/UID history lookups, auto-indexes teed captures on stop (`CACHE_SCHEMA_VERSION = 6`), and pushes `history_updated`.
 - Specification ready for FIxLag Server & Live Packet Mapper (`127.0.0.1:8766`): [docs/lag-mapper-spec.md](docs/lag-mapper-spec.md).
 - `tools/lag_mapper` runs a `127.0.0.1:8766` (auto-fallback) web + SSE server with 4 tabs, `:30101` batch Zstd (`mid=10208` dropped), `0x3f5` Wi-Fi vs Cellular RTT, `:30190` probes, TCP `:port+50` mirror, trusted-Wi-Fi wireless ADB (`Kos gk atas`, `Pribadi`), and `matches.csv` + `lag_mapper_notes.json` persistence.
+- Both tools list and accept only the `SM_S936B` phone (`FIXLAG_ADB_MODEL`, `any` = all devices; `tests/test_adb_model_filter.py`). The MlbbCustomActivity bridge starts both tools while MLBB runs and switches their link via `/api/source`.
 - Test suite (`pytest -v tests/test_chat_viewer.py`): 18 tests passing.
 - Packet mapper suite (`pytest -v tests/test_lag_mapper.py`): 9 tests passing.
 
