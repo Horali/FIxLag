@@ -37,6 +37,31 @@ python -m tools.chat_viewer --adb <serial> --tee
 pytest -v tests/test_chat_viewer.py
 ```
 
+**Setup on a fresh clone:**
+
+```sh
+pip install -r requirements.txt
+```
+
+**Chat templates (`data/chat_templates.json`):** the packet decoder is fully in
+`tools/chat_viewer/` (`kcp.py`, `protocol.py`, `battle.py`). Quick-chat, draft
+and hero messages arrive as numeric codes (for example `/11011`). The viewer
+turns them into text with `data/chat_templates.json`. This file is game text,
+so it is not in the repo. Without it the viewer still works, but shows raw codes.
+Build it once from your own game install:
+
+```sh
+# Rooted phone with MLBB installed
+python tools/dump_chat_templates.py --adb <serial>
+
+# Or a Document.unity3d you copied off the phone
+# (/sdcard/Android/data/com.mobile.legends/files/dragon2017/assets/Document/android/Document.unity3d)
+python tools/dump_chat_templates.py --document path/to/Document.unity3d
+```
+
+**Tests:** the replay tests use private `captures/*.pcap` files (they hold real
+player names), so they skip on a fresh clone. The synthetic tests still run.
+
 **Next experiment:** [`docs/experiment-restart-vs-host.md`](docs/experiment-restart-vs-host.md).
 
 Commits: Conventional Commits, small, `main`, no AI attribution.

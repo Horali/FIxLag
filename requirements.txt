@@ -1,0 +1,8 @@
+# Runtime for tools/chat_viewer and tools/lag_mapper
+starlette>=0.37
+uvicorn>=0.29
+# Optional: faster Zstd for tools/lag_mapper (falls back to the zstd CLI)
+zstandard>=0.22
+# Tests
+pytest>=8
+httpx>=0.27
