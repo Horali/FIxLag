@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import shutil
 import subprocess
 import threading
@@ -31,8 +32,18 @@ def find_adb(override: Path | str | None = None) -> Path | None:
     return Path(which) if which else None
 
 
+# Only this phone model is listed, so no tool or button can pick another phone on adb.
+# Set FIXLAG_ADB_MODEL=any to list every device.
+DEFAULT_ADB_MODEL = "SM_S936B"
+
+
+def adb_model_filter() -> str:
+    raw = os.environ.get("FIXLAG_ADB_MODEL", DEFAULT_ADB_MODEL).strip()
+    return "" if raw.lower() in ("", "any", "all", "*") else raw
+
+
 def list_adb_devices(adb_path: Path | str | None = None) -> list[dict[str, str]]:
-    """Return connected ADB devices reported by `adb devices -l`."""
+    """Return connected ADB devices reported by `adb devices -l` (only FIXLAG_ADB_MODEL)."""
     adb = find_adb(adb_path)
     if adb is None:
         return []
@@ -68,6 +79,9 @@ def list_adb_devices(adb_path: Path | str | None = None) -> list[dict[str, str]]
                 if k in ("model", "device", "product"):
                     info[k] = v
         devices.append(info)
+    model = adb_model_filter()
+    if model:
+        devices = [d for d in devices if d["model"] == model]
     return devices
 
 

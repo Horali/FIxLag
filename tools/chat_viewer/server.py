@@ -16,7 +16,7 @@ from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from .history import MatchHistoryStore
-from .ingest import IngestController, list_adb_devices
+from .ingest import IngestController, adb_model_filter, list_adb_devices
 from .session import MatchStore, SessionRouter
 from .templates import TemplateResolver
 from .ui import INDEX_HTML
@@ -159,6 +159,13 @@ def create_app(
                 serial = str(body.get("serial") or "").strip()
                 if not serial:
                     return JSONResponse({"error": "Missing 'serial'"}, status_code=400)
+                if adb_model_filter() and serial not in {
+                    d["serial"] for d in await asyncio.to_thread(list_adb_devices, adb_path)
+                }:
+                    return JSONResponse(
+                        {"error": f"{serial} is not the {adb_model_filter()} phone (FIXLAG_ADB_MODEL)"},
+                        status_code=400,
+                    )
                 tee = bool(body.get("tee", False))
                 preserve = True if mode == "switch_adb" else bool(body.get("preserve_session", False))
                 ingest.start_adb(serial, tee=tee, preserve_session=preserve)

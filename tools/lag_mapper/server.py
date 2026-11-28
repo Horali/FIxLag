@@ -21,6 +21,7 @@ from tools.chat_viewer.templates import TemplateResolver
 from .aggregator import DEFAULT_CAPTURES_DIR, DEFAULT_DATA_DIR, LagAggregator
 from .classifier import CITY_CLUSTERS
 from .ingest import LagIngestController, LiveStore, list_adb_devices
+from tools.chat_viewer.ingest import adb_model_filter
 from .ui import INDEX_HTML
 from .wireless_adb import TRUSTED_SSIDS, disable_wireless_adb, ensure_wireless_adb
 
@@ -194,6 +195,13 @@ def create_app(
                 serial = str(body.get("serial") or "").strip()
                 if not serial:
                     return JSONResponse({"error": "Missing 'serial'"}, status_code=400)
+                if adb_model_filter() and serial not in {
+                    d["serial"] for d in await asyncio.to_thread(list_adb_devices, adb_path)
+                }:
+                    return JSONResponse(
+                        {"error": f"{serial} is not the {adb_model_filter()} phone (FIXLAG_ADB_MODEL)"},
+                        status_code=400,
+                    )
                 tee = bool(body.get("tee", False))
                 ingest.start_adb(serial, tee=tee)
                 return JSONResponse({"ok": True, "status": store.get_status()})
