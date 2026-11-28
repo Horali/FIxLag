@@ -35,6 +35,13 @@ from tools.chat_viewer.templates import TemplateResolver
 
 CAPTURES_DIR = REPO_ROOT / "captures"
 
+# Replay tests need the author's private `.pcap` captures (they hold real player
+# names and UIDs, so they are never committed). Skip them on a fresh clone.
+needs_captures = pytest.mark.skipif(
+    not (CAPTURES_DIR / "draft_CHAT4.pcap").is_file(),
+    reason="private captures/*.pcap not present (not in the public repo)",
+)
+
 
 def _decode_pcap_whole(path: Path, templates_path: Path | None = None) -> tuple[MatchStore, SessionRouter, IncrementalPcapReader]:
     store = MatchStore()
@@ -131,6 +138,7 @@ def _make_fake_lzw_uncompressed_words(raw_bytes: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+@needs_captures
 def test_1_draft_chat4_merged_match() -> None:
     store, router, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_CHAT4.pcap")
     matches = store.get_matches()
@@ -164,6 +172,7 @@ def test_1_draft_chat4_merged_match() -> None:
     assert any(ev.raw_text == "1/tetahqjq" and ev.channel == 22 for ev in loading_evs)
 
 
+@needs_captures
 def test_2_draft_draft_merged_match() -> None:
     store, router, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_DRAFT.pcap")
     matches = store.get_matches()
@@ -185,6 +194,7 @@ def test_2_draft_draft_merged_match() -> None:
     assert any(ev.raw_text == "Team Hora" and ev.tick == 1180 and ev.side == "ENEMY" for ev in battle_evs)
 
 
+@needs_captures
 def test_3_draft_live6_4151_lz4_and_templates() -> None:
     # Verify exact KCP blocks sn=0..1, sn=5..20, sn=159..182 (24,088 bytes) first.
     reader = IncrementalPcapReader()
@@ -218,6 +228,7 @@ def test_3_draft_live6_4151_lz4_and_templates() -> None:
     assert by_text["7/154830/ 8"].slot == 0x24
 
 
+@needs_captures
 def test_4_live_chat_check_midmatch_resync() -> None:
     store, _, _ = _decode_pcap_whole(CAPTURES_DIR / "live_chat_check.pcap")
     matches = store.get_matches()
@@ -235,6 +246,7 @@ def test_4_live_chat_check_midmatch_resync() -> None:
     assert g.sync_tick == 4590
 
 
+@needs_captures
 def test_5_draft_chat3_raw_0x52_ticks() -> None:
     store, router, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_CHAT3.pcap")
     assert router.kcp.lz4_errors == 0
@@ -255,6 +267,7 @@ def test_5_draft_chat3_raw_0x52_ticks() -> None:
     ]
 
 
+@needs_captures
 def test_6_draft_live1_conv_rebind_single_match() -> None:
     store, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_LIVE1.pcap")
     matches = store.get_matches()
@@ -317,6 +330,7 @@ def test_6_draft_live1_conv_rebind_single_match() -> None:
     assert [ev.raw_text for ev in ms[0].events] == ["hello world"]
 
 
+@needs_captures
 def test_7_draft_relog_split_reused_port_and_fsm_rules() -> None:
     store, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_RELOG.pcap")
     matches = store.get_matches()
@@ -376,6 +390,7 @@ def test_7_draft_relog_split_reused_port_and_fsm_rules() -> None:
     assert [ev.raw_text for ev in ms[2].events] == ["1/draft three"]
 
 
+@needs_captures
 def test_8_chunked_partial_read_fuzz_and_linktypes() -> None:
     rng = random.Random(20261126)
     for fname in ("draft_CHAT4.pcap", "live_chat_check.pcap"):
@@ -416,6 +431,7 @@ def test_8_chunked_partial_read_fuzz_and_linktypes() -> None:
         assert pkts[0].payload == b"\x01\x75\x00\x00\x00\x00\x00\x00"
 
 
+@needs_captures
 def test_9_http_sse_integration_templates_and_fallback(tmp_path: Path) -> None:
     # Verify loopback guard.
     assert validate_loopback_host("127.0.0.1") == "127.0.0.1"
@@ -595,6 +611,7 @@ def test_9_http_sse_integration_templates_and_fallback(tmp_path: Path) -> None:
         assert stop_res.json()["status"]["source_detail"] == ""
 
 
+@needs_captures
 def test_10_past_games_history_cache_and_api(tmp_path: Path) -> None:
     caps_dir = tmp_path / "caps"
     hist_dir = tmp_path / "hist"
@@ -704,6 +721,7 @@ def test_10_past_games_history_cache_and_api(tmp_path: Path) -> None:
         assert all(g["game_id"] != live_gid for g in client.get("/api/history").json()["games"])
 
 
+@needs_captures
 def test_11_draft_live6_ev45_swap_and_attribution() -> None:
     store, _, _ = _decode_pcap_whole(CAPTURES_DIR / "draft_LIVE6.pcap")
     matches = store.get_matches()
@@ -1002,6 +1020,7 @@ def test_13_real_chat_templates_resolution(tmp_path: Path) -> None:
             assert ch10_20 and all(ev[3] == "2/0" for ev in ch10_20)
 
 
+@needs_captures
 def test_14_hero_pick_tracking_live_swap_and_1203(tmp_path: Path) -> None:
     def make_kcp_seg(conv: bytes, sn: int, body: bytes, frg: int = 0) -> bytes:
         return b"\x01\x51" + conv + struct.pack("<IIIHBBH", 0, 1, sn, 64, frg, 0, len(body)) + body
@@ -1211,6 +1230,7 @@ def test_14_hero_pick_tracking_live_swap_and_1203(tmp_path: Path) -> None:
         assert "heroForEvent" in r_home.text
 
 
+@needs_captures
 def test_15_history_dedup_and_dynamic_live_updates(tmp_path: Path) -> None:
     from tools.chat_viewer.history import MatchHistoryStore, _dedup_records
 
@@ -1407,6 +1427,7 @@ def test_15_history_dedup_and_dynamic_live_updates(tmp_path: Path) -> None:
         assert backfills
 
 
+@needs_captures
 def test_16_early_roster_1230_1242_mode_party_and_bots(tmp_path: Path) -> None:
     from tools.chat_viewer.history import CACHE_SCHEMA_VERSION
 
