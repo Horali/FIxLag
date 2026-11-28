@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -51,6 +52,15 @@ def create_app(
     """Build the Starlette ASGI app exposing `/`, `/events`, and JSON control/status APIs."""
     cap_dir = Path(captures_dir) if captures_dir is not None else DEFAULT_CAPTURES_DIR
     templates = TemplateResolver(templates_path)
+    if not templates.loaded:
+        print(
+            f"[chat_viewer] WARNING: no chat templates at {templates.path}.\n"
+            "  Quick-chat, draft and hero text will show as raw codes (e.g. /11011).\n"
+            "  Build the file once with: python tools/dump_chat_templates.py --adb <serial>\n"
+            "  (or --document <path to Document.unity3d>). See README 'Chat templates'.",
+            file=sys.stderr,
+            flush=True,
+        )
     store = MatchStore()
 
     def _notify_history_changed() -> None:
