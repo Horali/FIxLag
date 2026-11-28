@@ -390,6 +390,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   const state = {
     activeTab: "live",
     userPickedTab: false,
+    followLive: true,  // keep the live match on screen until the user picks an older one
     liveMatches: new Map(),
     liveOrder: [],
     selectedLiveId: null,
@@ -499,7 +500,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       m = Object.assign({ events: [], gaps: [], players: [] }, summary);
       state.liveMatches.set(id, m);
       state.liveOrder.push(id);
-      if (!state.selectedLiveId) state.selectedLiveId = id;
+      if (!state.selectedLiveId || state.followLive) state.selectedLiveId = id;
     } else {
       const prevEv = m.events || [];
       const prevGap = m.gaps || [];
@@ -687,6 +688,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         btn.className = "game-card" + (state.selectedLiveId === id ? " active" : "");
         btn.onclick = () => {
           state.selectedLiveId = id;
+          const st = state.status || {};
+          state.followLive = id === (st.active_match_id || state.liveOrder[state.liveOrder.length - 1]);
           state.autoScroll = true;
           renderSidebar();
           renderMain();
@@ -1200,6 +1203,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
     } catch (_e) {}
   }
 
+  // After a (re)load, show the live match, not the oldest one.
+  function selectLiveMatch() {
+    const id = state.status && state.status.active_match_id;
+    if (id && state.liveMatches.has(id)) state.selectedLiveId = id;
+    else if (state.liveOrder.length > 0) state.selectedLiveId = state.liveOrder[state.liveOrder.length - 1];
+    state.followLive = true;
+  }
+
+  function followActiveMatch() {
+    const id = state.status && state.status.active_match_id;
+    if (!state.followLive || !id || id === state.selectedLiveId || !state.liveMatches.has(id)) return;
+    state.selectedLiveId = id;
+    state.autoScroll = true;
+    renderSidebar();
+    if (state.activeTab === "live") renderMain();
+  }
+
   async function refreshDevicesAndPcaps() {
     try {
       const prevSerial = el.adbSelect.value;
@@ -1271,6 +1291,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       alive();
       state.status = JSON.parse(ev.data);
       renderTopStatus();
+      followActiveMatch();
     });
 
     es.addEventListener("source_reset", (ev) => {
@@ -1295,6 +1316,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       state.selectedLiveId = null;
       for (const m of (d.matches || [])) ensureLiveMatch(m);
       if (d.status) state.status = d.status;
+      selectLiveMatch();
       renderTopStatus();
       renderSidebar();
       if (state.liveOrder.length > 0) setTab("live", false);
@@ -1507,6 +1529,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       const d = await res.json();
       for (const m of (d.matches || [])) ensureLiveMatch(m);
       if (d.status) state.status = d.status;
+      selectLiveMatch();
       renderTopStatus();
       renderSidebar();
       renderMain();
